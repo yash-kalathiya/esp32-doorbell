@@ -1,0 +1,14 @@
+.venv/
+.local-data/
+__pycache__/
+.pytest_cache/
+artifacts/
+models/*.onnx
+models/*.tmp
+.lwc/
+firmware/Doorbell/wifi_credentials.h
+.env
+.env.*
+!.env.example
+*.pem
+*.key

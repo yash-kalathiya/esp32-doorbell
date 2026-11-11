@@ -1,0 +1,386 @@
+# ESP32 doorbell
+
+## First setup after cloning
+
+```bash
+git clone https://github.com/yash-kalathiya/esp32-doorbell.git
+cd esp32-doorbell
+cp firmware/Doorbell/wifi_credentials.example.h firmware/Doorbell/wifi_credentials.h
+```
+
+Edit the local `wifi_credentials.h` with your own Wi-Fi details before compiling
+or uploading firmware. That header, face databases/photos, test artifacts,
+downloaded model weights, virtual environments and Wiki state are excluded from
+Git. The model download script installs verified weights separately.
+
+## Laptop dashboard
+
+The dashboard runs on your laptop and works in a phone browser on the same
+Wi-Fi. It relays live MJPEG video, offers Start/Stop and downloadable snapshots,
+shows camera/sensor status, saves received motion/sound events locally, and
+recognises enrolled faces using local YuNet + SFace models on the laptop.
+The firmware and hardware settings are unchanged.
+
+1. Power the ESP32-CAM normally, with the IO0–GND upload jumper removed.
+2. Connect the ESP32-CAM, laptop, and phone to the same Wi-Fi. Keep the laptop
+   awake while using the dashboard.
+3. Open `http://localhost:8000` on the laptop. Select the settings icon and enter
+   the camera's current IP address (from Serial Monitor). The default is the
+   last known home address, `192.168.12.140`.
+4. Select **Start live**. Close any old direct ESP32 video stream first: the
+   laptop maintains one connection to the camera and shares it with its viewers.
+5. Select **Open on your phone** at the bottom of the dashboard. It shows the
+   laptop's current LAN URL, such as `http://LAPTOP_WIFI_IP:8000`.
+
+Both the laptop and camera IP addresses may change when Wi-Fi changes. The
+phone opens the **laptop's** address; camera settings use the **ESP32's** address.
+Guest/campus networks may prevent devices from reaching each other. The app
+reports unavailable devices without displaying sample video or invented events.
+
+The running user service lasts until stopped or the laptop reboots:
+
+```bash
+systemctl --user status esp32-doorbell-dashboard
+systemctl --user stop esp32-doorbell-dashboard
+```
+
+To start it again:
+
+```bash
+systemd-run --user --collect --unit=esp32-doorbell-dashboard \
+  --property=Restart=on-failure \
+  --working-directory=/home/yash/Project/esp32-doorbell \
+  /home/yash/Project/esp32-doorbell/scripts/run-dashboard.sh
+```
+
+For foreground development, stop the service first, then:
+
+```bash
+cd /home/yash/Project/esp32-doorbell
+# Only needed when setting up on a new laptop:
+uv venv .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+.venv/bin/python scripts/download-face-models.py
+./scripts/run-dashboard.sh
+```
+
+The server listens on `0.0.0.0:8000`. `PORT=8001 ./scripts/run-dashboard.sh`
+selects a different port. Logs: `journalctl --user -u esp32-doorbell-dashboard`.
+
+**Behavior and limits:** Start/Stop control the camera's shared manual-live
+state. Stop also pauses viewing in the current browser; it does not cancel a
+sensor's activity window. The activity toggle automatically displays available
+video while this page is open. It does not record video. Face monitoring is a
+separate server function with its own toggle (see below).
+The sound module supplies digital threshold events, not microphone audio.
+
+The server polls the existing firmware every two seconds; no callback setting
+or new firmware upload is required. Received events are deduplicated using
+camera address, device ID, boot ID, and event ID. The newest 2,000 events remain
+in `.local-data/events.sqlite3` across server restarts; the newest 100 for the
+selected camera appear in the feed. Feed times indicate **first received by
+the laptop**, not the exact detection time. Camera uptime is shown separately.
+Settings live in `.local-data/settings.json`. These files contain no Wi-Fi
+credentials. The app is intended for a trusted LAN and has no user login.
+
+Source: `server/app.py` (FastAPI relay), `web/` (responsive dashboard),
+`scripts/run-dashboard.sh` (launcher).
+
+### Name an unknown face
+
+1. Connect the camera and laptop to the same Wi-Fi, then open **Faces** in the
+   dashboard. **Monitor faces** is enabled by default.
+2. Face monitoring checks images about every three seconds while the server
+   runs, including with no browser open. It reuses current live-stream frames;
+   when video is idle, it requests `/api/snapshot` from the ESP32 instead.
+3. A usable unrecognised face appears as a photo under **Unknown faces**.
+   Review that photo, type the person's name and select **Save person**.
+4. The laptop saves its SFace embedding as an enrolled sample. Later camera
+   images are compared against saved samples; no model training is required.
+5. Enter an existing name on another unknown capture to add a sample to that
+   profile. Name matching ignores case. More clear, varied samples can help.
+
+Saved people and recent recognised captures appear below the unknown captures.
+Background refresh preserves partially typed names. **Remove** deletes a
+profile, its saved samples, and its associated face history. Future sightings
+can then appear as unknown again.
+
+### Enroll from uploaded photos
+
+Select **Upload photos** in Faces, enter a name, choose photos and select
+**Add photos to recognition**. **Add photos** on a saved profile opens the same
+form with its name filled in. An existing name adds samples to that profile.
+Enrollment works with the ESP32 offline and with background monitoring paused.
+
+Upload up to 10 JPEG, PNG, WebP, HEIC/HEIF or AVIF images per request, up to 8 MB each and
+40 MB total. Each photo must contain exactly one detected, usable face of the
+intended person. The server checks the decoded format, fixes EXIF orientation,
+strips metadata, and rejects images over 24 megapixels. Small/blurry faces,
+group photos, corrupt files and unsupported formats receive individual reasons.
+Usable photos are added even if other files fail; no empty profile is created
+when all photos fail. The error banner includes the actual rejection reason.
+JPEG-based MPO files, which can also use a `.jpeg` extension, are read using
+their primary image. Other unsupported formats report their detected format.
+
+Only face crops and embeddings are retained. Original uploads are closed after
+processing and are not retained as enrollment files or logged. Uploaded photos
+are not recorded as camera sightings. Profiles retain their newest 20 samples.
+
+### Test recognition with a photo or this device's camera
+
+The **Test recognition** panel compares a photo with saved profiles without
+enrolling anyone, saving test images, or changing face/activity history. Choose
+a test photo and select **Run test**, or choose **Use device camera** to preview
+the camera attached to the device opening the page. **Front / selfie camera**
+and **Back camera** request the corresponding camera when available.
+
+Live tests send one sampled frame to the laptop about every two seconds, with
+one request at a time. No microphone access is requested. **Stop camera**, leaving
+the page, or hiding the page releases the camera and stops live checks. Results
+show each usable face crop, its matched name or **Unknown**, and cosine similarity
+(not a probability). Use different photos from enrollment to assess recognition
+rather than testing only an exact copy of a saved image.
+
+Browser camera access requires a secure context. On the laptop open
+`http://localhost:8000/#faces` (or `http://127.0.0.1:8000/#faces`). A phone opening
+`http://LAPTOP_IP:8000` cannot grant continuous live camera access. The panel
+explains this and offers **Take photo**, which requests native photo capture on
+supported mobile browsers; other browsers may show a file picker. Continuous
+phone camera access needs the dashboard served over HTTPS with a certificate
+trusted by that phone. HTTPS/certificate trust has not been configured by this
+change. The page also works on an existing trusted HTTPS deployment.
+
+**Monitor faces** pauses/resumes automatic image checks and is saved across
+restarts. **Stop** in the video pane only controls live viewing; pause face
+monitoring separately to stop background snapshots. The camera remains powered.
+
+Models are downloaded once from the official OpenCV Zoo, with SHA-256 checks
+against its Git LFS records. The YuNet model is MIT licensed; SFace is Apache
+2.0 licensed (copies are in `models/`). Inference and enrollment run locally;
+camera images and face profiles are not sent to an external recognition API.
+If models are missing or invalid, the rest of the dashboard still works and
+the face section reports the setup problem. Run the model download script and
+restart the server to recover.
+
+Face photos, normalised embeddings, names and observation timestamps are stored
+in `.local-data/faces.sqlite3`. Retention is bounded to 100 unknown capture
+groups, 300 recognised capture groups, 100 profiles and 20 samples per profile.
+Captures are scoped to the configured camera address; profiles are shared across
+camera address changes. Repeated similar unknown observations are grouped as a
+review aid; these groups are not verified unique people or movement tracks.
+
+Small faces (under 48 pixels) and blurry crops are skipped. Matching starts at
+cosine similarity 0.50 with a 0.08 margin over the next profile; close or weak
+matches remain unknown. These are initial operating thresholds, not calibrated
+probabilities or a promised accuracy. Validate with real camera images, varied
+lighting, and both enrolled and unenrolled people before relying on alerts.
+This version has no liveness detection or automatic Wi-Fi identity tracking.
+
+### Laptop API (port 8000)
+
+These are the laptop endpoints; the firmware endpoints below run on the camera.
+
+| Method | Path | Result |
+| --- | --- | --- |
+| GET | `/api/status` | Connection state, latest camera status, video relay status |
+| GET | `/api/events` | Up to 100 saved events for the selected camera |
+| POST | `/api/events` | Accept and deduplicate an optional firmware callback |
+| GET | `/api/settings` | Configured camera base URL |
+| PUT | `/api/settings` | Save `{"camera_url":"http://192.168.12.140"}` locally |
+| GET | `/api/network` | Current laptop LAN URL for the phone |
+| POST | `/api/live/start` | Request manual live view from the camera |
+| POST | `/api/live/stop` | Clear the camera's manual-live request |
+| GET | `/api/stream` | MJPEG shared from one camera stream |
+| GET | `/api/snapshot` | Download a JPEG from the camera |
+| GET | `/api/faces` | Model/monitoring state, unknown captures, people, recent matches |
+| POST | `/api/faces/{id}/enroll` | Save `{"name":"Person name"}` for a reviewed capture |
+| GET | `/api/faces/{id}/image` | Captured face thumbnail |
+| GET | `/api/people/{id}/image` | Profile thumbnail |
+| DELETE | `/api/people/{id}` | Remove a profile, samples and associated face captures |
+| POST | `/api/people/upload` | Multipart `name` + repeated `files` fields; enroll usable photo samples |
+| POST | `/api/faces/test` | Multipart `file`; return transient face-match results without saving |
+
+`PUT /api/settings` also accepts `"face_monitoring": false` to pause automatic
+face checks. Preserve `camera_url` when updating this setting.
+
+### Dashboard checks
+
+```bash
+uv pip install --python .venv/bin/python -r requirements-dev.txt
+.venv/bin/python -m pytest -q tests/test_dashboard.py tests/test_faces.py
+# With the dashboard running and Google Chrome installed:
+.venv/bin/python scripts/check-dashboard.py
+```
+
+Protocol tests use a synthetic camera to verify cursor resets, deduplication,
+history persistence, offline status, one upstream for multiple viewers,
+connection cleanup, controls and snapshots. Browser checks exercise the running
+UI at desktop/mobile widths and use clearly synthetic responses for live-video
+controls. They do not establish real-camera or physical-phone streaming.
+
+Face tests cover enrollment, subsequent matching, unknown/ambiguous results,
+profile persistence/deletion, API validation, camera scoping, background
+snapshot checks and reuse of the existing stream. The isolated real-model
+browser test uses an OpenCV sample image and a temporary gallery:
+
+```bash
+mkdir -p artifacts
+curl -fsSL -o artifacts/face-model-test.jpg \
+  https://raw.githubusercontent.com/opencv/opencv/master/samples/data/lena.jpg
+.venv/bin/python scripts/check-faces-ui.py
+```
+
+That test verifies the name-and-save flow and recognition of a subsequent
+sample image, real-model upload enrollment, read-only photo tests, and sampled
+live recognition through Chrome's simulated video camera. It also checks camera
+release and the insecure-origin HTTPS guidance. It is not an evaluation of new
+viewpoints, household accuracy, physical webcams or mobile browser permissions.
+No test identities or sample images are inserted into the running gallery.
+
+## Firmware upload
+
+Open `firmware/Doorbell/Doorbell.ino` in Arduino IDE. Keep every file in that
+sketch directory together. Select **AI Thinker ESP32-CAM**, choose the actual
+USB serial port, and upload using the working USB-to-TTL wiring and IO0-to-GND
+upload jumper. Remove that jumper with power disconnected after uploading.
+Serial Monitor uses **115200 baud**. Wi-Fi settings live in the Git-excluded
+`wifi_credentials.h`; use the example header when setting up a new checkout.
+Do not paste passwords into logs or commit that local header.
+
+## Sensor wiring
+
+Disconnect power before wiring. Use a shared ground, preferably the power GND
+beside 5V for the USB supply. Do not use the ambiguous corner GND/R pin.
+Leave the microSD slot empty and do not initialize SD storage: GPIO13/14 are
+shared with the SD interface.
+
+| Sensor | Sensor pin | ESP32-CAM / supply |
+| --- | --- | --- |
+| HC-SR501 PIR | VCC | regulated 5V |
+| HC-SR501 PIR | GND | common GND |
+| HC-SR501 PIR | OUT | IO13 / GPIO13 |
+| Four-pin sound detector | + | 3V3, provided the module supports 3.3V operation |
+| Four-pin sound detector | G | common GND |
+| Four-pin sound detector | D0 | IO14 / GPIO14 |
+| Four-pin sound detector | A0 | leave disconnected |
+
+ESP32 signal pins are 3.3V logic. Do not feed a 5V sound output into IO14.
+The code reads a digital noise threshold, **not microphone audio**. Verify the
+sound module's voltage specification before connecting it. For the usual LM393
+module, adjust the potentiometer until its threshold LED reacts to a clap.
+`doorbell_config.h` contains sensor enable switches, pins, active polarity and
+timing. The default D0 trigger is LOW; change `DOORBELL_SOUND_ACTIVE_LOW` to
+`false` if the module asserts HIGH. Unconnected sensor pins have pull resistors;
+the firmware can be uploaded before the sensors are attached.
+
+PIR motion is ignored for the first **60 seconds** after sensor initialization;
+sound input settles for 2 seconds. Motion HIGH must be stable for 100ms.
+Sound interrupts only latch a flag; processing happens in a sensor task, with
+at most one sound event per 3 seconds. Sensors continue running while Wi-Fi
+reconnects or the laptop is unavailable.
+
+## API v1
+
+Replace `ESP_IP` with the address printed in Serial Monitor after each network
+change. Control and JSON endpoints use port **80**. MJPEG uses port **81**.
+This is a local-network prototype; these endpoints have no authentication.
+
+| Method | URL | Result |
+| --- | --- | --- |
+| GET | `http://ESP_IP/api/status` | Wi-Fi, sensor readiness, activity window, stream clients, event/callback counters |
+| GET | `http://ESP_IP/api/snapshot` | One JPEG image on demand |
+| POST | `http://ESP_IP/api/live/start` | Set manual live request; return status |
+| POST | `http://ESP_IP/api/live/stop` | Clear manual request; return status |
+| GET | `http://ESP_IP:81/api/stream` | MJPEG while manual viewing or sensor activity is active; 409 if idle |
+| GET | `http://ESP_IP/api/events?after=0` | Retained sensor events and next cursor |
+| GET | `http://ESP_IP/api/config` | Current optional event-delivery URL |
+| POST | `http://ESP_IP/api/config` | Save `{"event_url":"http://LAPTOP_IP:8000/api/events"}` in NVS |
+
+The control server is separate from the stream server, so stop/status calls
+can be serviced while video is streaming. Use one upstream stream connection
+from the laptop server and distribute its frames there. Do not depend
+on the ESP32 serving multiple simultaneous stream viewers.
+
+PIR or sound opens a **30-second activity window**; further activity extends it.
+PIR staying HIGH keeps that window open. Manual viewing remains on until stopped.
+Stopping manual viewing does not cancel an active motion/sound window. When
+both are inactive, the API stream ends. The camera stays initialized and Wi-Fi
+stays connected; stopping a stream is not deep sleep or physical camera power-off.
+
+The original camera page at `/`, `/capture`, `/status`, `/control` and
+`:81/stream` still work. The original `:81/stream` is a direct manual view until
+the client disconnects and is not controlled by `/api/live/stop`. The laptop
+integration should use the new `:81/api/stream` endpoint.
+
+## Laptop integration after uploading
+
+No laptop server is required for the current camera page or event polling.
+Until an event URL is configured, the firmware makes no outbound event requests.
+
+For a manual test from a laptop on the same network:
+
+```bash
+curl -X POST http://ESP_IP/api/live/start
+# Open http://ESP_IP:81/api/stream in a browser.
+curl -X POST http://ESP_IP/api/live/stop
+curl 'http://ESP_IP/api/events?after=0'
+```
+
+Once the laptop server exists, set its address without another firmware upload:
+
+```bash
+curl -X POST http://ESP_IP/api/config \
+  -H 'Content-Type: application/json' \
+  -d '{"event_url":"http://LAPTOP_IP:8000/api/events"}'
+```
+
+The callback URL survives power loss. Clear it with `{"event_url":""}`.
+Use a trusted LAN HTTP endpoint; HTTPS and credential-bearing URLs are not
+supported in this prototype. Configuration contains no Wi-Fi passwords.
+
+Each callback POST is a JSON event, for example:
+
+```json
+{"device_id":"esp32cam-example","boot_id":"1234abcd","id":1,"type":"motion","uptime_ms":61000}
+```
+
+The laptop must return a **2xx** response to acknowledge an event. Failed
+delivery is retried after 5 seconds with bounded HTTP timeouts. Delivery is
+at least once: deduplicate by `(device_id, boot_id, id)`. The ring retains the
+newest **24 events in RAM**, not video or historical events across reboots.
+An extended outage can overwrite old events; status reports lost callback
+events and polling reports `lost_before_cursor`.
+
+For polling, track `boot_id` and `next_after`; reset the cursor to zero when
+the boot ID changes. Poll about once per second if using events to open video.
+A cursor beyond the newest ID returns `reset_required: true` and retained events.
+The same ring is used for push and polling; neither consumes the other view.
+`uptime_ms` is time since ESP32 startup, not UTC. Check event age and current
+`stream_allowed` before treating a delayed event as current activity.
+
+The ESP32 makes video available but does not independently record or upload
+video when a sensor fires. The laptop server polls events, relays the MJPEG
+stream and runs face recognition; video recording is not implemented.
+
+## Verification boundary
+
+Host tests exercise activity timing, sensor warm-up, overlap with manual viewing,
+sound cooldown, millisecond-clock rollover and event-ring retention/cursors:
+
+```bash
+g++ -std=c++17 -Wall -Wextra -Werror tests/doorbell_logic_test.cpp -o /tmp/doorbell-logic-test
+/tmp/doorbell-logic-test
+```
+
+Compile the sketch with the installed ESP32 core:
+
+```bash
+arduino-cli --config-file /home/yash/.arduinoIDE/arduino-cli.yaml compile \
+  --fqbn esp32:esp32:esp32cam --jobs 2 firmware/Doorbell
+```
+
+These checks do not validate real GPIO polarity, wiring, Wi-Fi failover, NVS,
+HTTP callbacks, HTTP stream cancellation or camera operation on the board.
+After uploading, confirm `/api/status`, wait for `pir_ready`, trigger each sensor,
+inspect `/api/events`, then test manual start/stop and activity-window expiry.
+Leave the callback unset until the laptop server is implemented and tested.

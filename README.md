@@ -237,6 +237,52 @@ release and the insecure-origin HTTPS guidance. It is not an evaluation of new
 viewpoints, household accuracy, physical webcams or mobile browser permissions.
 No test identities or sample images are inserted into the running gallery.
 
+## Current communication and Wi-Fi sensing path
+
+The camera and laptop communicate over **HTTP over TCP/IP on Wi-Fi**. Both join
+the same router/LAN; the ESP32 is the HTTP server and the laptop initiates pulls.
+
+| Data | Connection | Format |
+| --- | --- | --- |
+| Live camera video | Laptop GET `http://ESP_IP:81/api/stream` | MJPEG: successive JPEG images in an HTTP multipart response |
+| Status and sensor events | Laptop GET port 80 `/api/status`, `/api/events` about every two seconds | JSON |
+| Snapshot | Laptop GET port 80 `/api/snapshot` | JPEG |
+| Live controls | Laptop POST port 80 `/api/live/start`, `/api/live/stop` | HTTP request / JSON response |
+| Optional sensor callback | ESP32 POST to the configured laptop event URL | JSON over HTTP |
+| Phone dashboard | Browser connects to laptop port 8000 | HTTP, JSON polling, relayed MJPEG |
+| Device-camera recognition test | Browser POST `/api/faces/test` about every two seconds | Sampled JPEG frames in multipart form data |
+
+There is no WebRTC, RTSP, MQTT or CSI transport in the current camera firmware.
+USB serial is used for uploading/debugging, not normal power-bank operation.
+
+**CSI research is not enabled in this project yet.** Espressif documents CSI
+support on the original ESP32 as well as newer ESP32 variants. The locally
+installed ESP32 Arduino core 3.3.12 exposes `esp_wifi_set_csi_rx_cb`,
+`esp_wifi_set_csi_config` and `esp_wifi_set_csi`; its ESP32 configuration has
+`CONFIG_ESP_WIFI_CSI_ENABLED=1`. This establishes software capability, not
+working capture or reliable sensing on this physical board.
+
+An experiment on the current ESP32-CAM would add a bounded CSI callback queue
+and a separate UDP sender, then measure actual received packet cadence, losses,
+and camera performance with CSI off/on. Test empty-room and walking periods on
+the home network before implementing occupancy decisions. The camera and laptop
+must be reachable on the same LAN. No CSI firmware was flashed during this review.
+
+For RuView compatibility, raw measurements need its ADR-018 binary framing.
+Its sensing server receives node data on **UDP 5005** and offers processed
+results over HTTP/WebSocket. Our laptop server could consume those results and
+show a separate presence/motion panel. RuView's documented main node target is
+ESP32-S3; its supplied S3 firmware is not a drop-in image for the ESP32-CAM.
+A dedicated supported node is an alternative to porting capture on this board.
+
+One radio link is mainly a presence/motion experiment. Multiple spatial links
+and room calibration are needed to evaluate location/track separation. A Wi-Fi
+motion event does not automatically identify the person seen by the camera.
+
+References: [Espressif ESP-CSI](https://github.com/espressif/esp-csi),
+[RuView node firmware and wire format](https://github.com/ruvnet/RuView/blob/main/firmware/esp32-csi-node/README.md),
+[RuView live-data server](https://github.com/ruvnet/RuView/blob/main/docs/user-guide.md#esp32-s3-full-csi).
+
 ## Firmware upload
 
 Open `firmware/Doorbell/Doorbell.ino` in Arduino IDE. Keep every file in that

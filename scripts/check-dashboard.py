@@ -21,6 +21,7 @@ async def main():
         response = await page.goto(BASE)
         assert response.status == 200
         await expect(page.locator("#connection-label")).not_to_have_text("Checking camera")
+        await expect(page.locator("#dashboard-updates")).to_have_text("Live · SSE")
         await page.screenshot(path=str(ARTIFACTS / "dashboard-desktop.png"), full_page=True)
         await page.get_by_role("button", name="Camera settings", exact=True).click()
         await expect(page.locator("#settings-dialog")).to_be_visible()
@@ -51,6 +52,8 @@ async def main():
         async def mock(route):
             nonlocal manual
             path = route.request.url.split("/api/")[1].split("?")[0]
+            if path == "updates":
+                return await route.fulfill(status=503, body="SSE disabled for synthetic API-control checks")
             if path == "stream":
                 body = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n--frame--\r\n"
                 return await route.fulfill(content_type="multipart/x-mixed-replace; boundary=frame", body=body)

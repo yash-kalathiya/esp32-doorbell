@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <WiFiMulti.h>
 #include "doorbell_api.h"
+#include "doorbell_mqtt.h"
 
 // ===========================
 // Select camera model in board_config.h
@@ -121,6 +122,7 @@ void setup() {
   doorbellBegin();
 
   WiFi.mode(WIFI_STA);
+  doorbellMqttBegin();
   WiFi.setSleep(false);
   wifiMulti.addAP(ssid, password);
   if (homeSsid[0] != '\0') {

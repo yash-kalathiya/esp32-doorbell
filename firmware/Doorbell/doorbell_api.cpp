@@ -8,6 +8,7 @@
 #include "doorbell_api.h"
 #include "doorbell_config.h"
 #include "doorbell_logic.h"
+#include "doorbell_mqtt.h"
 
 namespace {
 DoorbellLogic logic(DOORBELL_ACTIVITY_MS, DOORBELL_PIR_WARMUP_MS,
@@ -78,7 +79,7 @@ cJSON *eventJson(const DoorbellLogic::Event &event) {
   return json;
 }
 
-esp_err_t apiStatus(httpd_req_t *req) {
+cJSON *statusJson() {
   bool manual, active, motion, ready;
   uint32_t remaining, newest, oldest, overwritten, delivered, lost;
   int clients, deliveryStatus;
@@ -100,7 +101,7 @@ esp_err_t apiStatus(httpd_req_t *req) {
   clients = streamClients;
   portEXIT_CRITICAL(&stateMux);
   cJSON *json = cJSON_CreateObject();
-  if (!json) return httpd_resp_send_500(req);
+  if (!json) return nullptr;
   cJSON_AddNumberToObject(json, "api_version", 1);
   cJSON_AddStringToObject(json, "device_id", deviceId);
   cJSON_AddStringToObject(json, "boot_id", bootId);
@@ -129,8 +130,11 @@ esp_err_t apiStatus(httpd_req_t *req) {
   cJSON_AddNumberToObject(json, "callback_events_lost", lost);
   cJSON_AddNumberToObject(json, "callback_last_status", deliveryStatus);
   cJSON_AddStringToObject(json, "stream_path", ":81/api/stream");
-  return jsonResponse(req, json);
+  doorbellMqttStatus(json);
+  return json;
 }
+
+esp_err_t apiStatus(httpd_req_t *req) { return jsonResponse(req, statusJson()); }
 
 esp_err_t apiLiveStart(httpd_req_t *req) {
   portENTER_CRITICAL(&stateMux);
@@ -275,6 +279,21 @@ bool doorbellBegin() {
     Serial.println("Sensor task could not start; sensor events are unavailable.");
   }
   return sensorTaskReady;
+}
+
+const char *doorbellDeviceId() { return deviceId; }
+const char *doorbellBootId() { return bootId; }
+cJSON *doorbellStatusJson() { return statusJson(); }
+void doorbellSetManual(bool on) {
+  portENTER_CRITICAL(&stateMux);
+  logic.setManual(on);
+  portEXIT_CRITICAL(&stateMux);
+}
+bool doorbellNextEvent(uint32_t after, DoorbellLogic::Event *out) {
+  portENTER_CRITICAL(&stateMux);
+  bool found = logic.copyAfter(after, out, 1) != 0;
+  portEXIT_CRITICAL(&stateMux);
+  return found;
 }
 
 bool doorbellLiveActive() {

@@ -58,6 +58,10 @@ async def main():
                     errors = []
                     page.on("pageerror", lambda error: errors.append(str(error)))
                     await page.goto(base)
+                    await expect(page.locator('#dashboard-updates')).to_have_text('Live · SSE')
+                    async with httpx.AsyncClient() as client:
+                        await client.post(base + '/api/events', json={"device_id":"isolated-qa-camera", "boot_id":"qa-only", "id":1, "type":"motion", "uptime_ms":65000})
+                    await expect(page.get_by_text('Motion detected', exact=True)).to_be_visible()
                     await expect(page.locator(".unknown-card")).to_have_count(1, timeout=15000)
                     await page.evaluate("""() => { const banner=document.createElement('p'); banner.textContent='ISOLATED QA · OpenCV sample image · no real ESP32 or household profile'; banner.style='background:#f7ecd4;padding:14px;text-align:center;margin:0'; document.body.prepend(banner); }""")
                     assert await page.locator('.unknown-card img').evaluate('img => img.complete && img.naturalWidth > 0')
@@ -132,7 +136,7 @@ async def main():
                     print(json.dumps({"isolated_real_model_test": "passed", "unknown_thumbnail": True,
                         "name_preserved_during_refresh": True, "enrollment": True,
                         "subsequent_sample_recognized": True, "mobile_layout": True,
-                        "pause_and_delete": True, "real_model_photo_upload": True,
+                        "pause_and_delete": True, "real_model_photo_upload": True, "sse_event_updates": True,
                         "read_only_recognition_test": True, "fake_device_camera_matching_and_stop": True,
                         "insecure_origin_help": True, "precise_upload_errors": True,
                         "javascript_errors": errors}))

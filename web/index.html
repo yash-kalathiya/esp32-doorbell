@@ -16,6 +16,7 @@
 <main>
   <div class="page-heading"><div><p class="eyebrow">YOUR SPACE, AT A GLANCE</p><h1>A little closer to home.</h1><p class="subtitle">Live video and activity from your doorbell.</p></div><span class="connection" id="connection"><span class="dot"></span><span id="connection-label">Checking camera</span></span></div>
   <div id="notice" class="notice" role="status" hidden></div>
+  <section class="transport-health" aria-label="IoT connection health"><div><span class="health-label">MQTT broker</span><strong id="mqtt-broker-state">Not configured</strong></div><div><span class="health-label">Device MQTT</span><strong id="mqtt-device-state">Waiting for firmware</strong></div><div><span class="health-label">Live controls</span><strong id="control-transport">HTTP</strong></div><div><span class="health-label">Dashboard updates</span><strong id="dashboard-updates">Connecting…</strong></div><p id="mqtt-detail">Checking the gateway connection.</p></section>
   <div class="dashboard-grid">
     <section class="camera-card" id="live" aria-labelledby="camera-title">
       <div class="card-heading"><div class="location"><span class="small-icon"><svg><use href="#i-camera"/></svg></span><div><h2 id="camera-title">Front door</h2><p>ESP32-CAM <span class="separator">/</span> Wi-Fi camera</p></div></div><span class="tag" id="video-state">Standby</span></div>

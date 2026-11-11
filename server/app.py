@@ -4,6 +4,7 @@ import base64
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 import ipaddress
+import json
 import logging
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from server.faces import FaceStore, MATCH_THRESHOLD, OpenCVEngine, prepare_photo, validate_name
+from server.mqtt_bridge import MQTTBridge
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -93,6 +95,9 @@ class CameraHub:
         self.settings = Settings.model_validate_json(config.read_text()) if config.exists() else Settings()
         self.db = sqlite3.connect(self.data_dir / "events.sqlite3")
         self.db.execute("CREATE TABLE IF NOT EXISTS events (camera_url TEXT, device_id TEXT, boot_id TEXT, id INTEGER, type TEXT, uptime_ms INTEGER, received_at TEXT, PRIMARY KEY(camera_url,device_id,boot_id,id))")
+        if "source" not in [column[1] for column in self.db.execute("PRAGMA table_info(events)")]:
+            self.db.execute("ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT 'http'")
+            self.db.commit()
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(4, connect=2), transport=transport, trust_env=False)
         self.poll_interval = poll_interval
         self.status = None
@@ -122,6 +127,18 @@ class CameraHub:
         self.face_count = 0
         self.face_rejected = 0
         self.config_generation = 0
+        self.changed = asyncio.Event()
+        self.mqtt = MQTTBridge(self, self.data_dir / "mqtt/gateway.json")
+
+    timestamp = staticmethod(now)
+
+    async def discover_camera(self, ip):
+        try:
+            settings = Settings(camera_url=f"http://{ip}", face_monitoring=self.settings.face_monitoring)
+            if settings.camera_url != self.settings.camera_url:
+                await self.configure(settings)
+        except ValueError:
+            logging.getLogger(__name__).warning("MQTT device reported an invalid camera IP")
 
     def face_status(self):
         return {"model_state": self.face_state, "enabled": self.settings.face_monitoring,
@@ -175,24 +192,28 @@ class CameraHub:
                     logging.getLogger(__name__).warning("Face check failed", exc_info=True)
             await asyncio.sleep(3)
 
-    def save_event(self, event, camera_url=None):
+    def save_event(self, event, camera_url=None, source="http"):
         e = Event.model_validate(event)
-        self.db.execute("INSERT OR IGNORE INTO events VALUES (?,?,?,?,?,?,?)", (
-            camera_url or self.settings.camera_url, e.device_id, e.boot_id, e.id, e.type, e.uptime_ms, now()))
+        base = camera_url or self.settings.camera_url
+        self.db.execute("INSERT OR IGNORE INTO events(camera_url,device_id,boot_id,id,type,uptime_ms,received_at,source) VALUES (?,?,?,?,?,?,?,?)", (
+            base, e.device_id, e.boot_id, e.id, e.type, e.uptime_ms, now(), source))
+        self.db.execute("UPDATE events SET source='mqtt+http' WHERE camera_url=? AND device_id=? AND boot_id=? AND id=? AND source<>?", (base, e.device_id, e.boot_id, e.id, source))
         # Bound local retention; duplicates keep their original first-received time.
         self.db.execute("DELETE FROM events WHERE rowid NOT IN (SELECT rowid FROM events ORDER BY rowid DESC LIMIT 2000)")
         self.db.commit()
+        self.changed.set()
 
     def events(self):
-        rows = self.db.execute("SELECT device_id,boot_id,id,type,uptime_ms,received_at FROM events WHERE camera_url=? ORDER BY rowid DESC LIMIT 100", (self.settings.camera_url,)).fetchall()
-        return [dict(zip(("device_id", "boot_id", "id", "type", "uptime_ms", "received_at"), row)) for row in rows]
+        rows = self.db.execute("SELECT device_id,boot_id,id,type,uptime_ms,received_at,source FROM events WHERE camera_url=? ORDER BY rowid DESC LIMIT 100", (self.settings.camera_url,)).fetchall()
+        return [dict(zip(("device_id", "boot_id", "id", "type", "uptime_ms", "received_at", "source"), row)) for row in rows]
 
     def state(self):
         return {"online": self.online, "camera_url": self.settings.camera_url,
                 "last_seen": self.last_seen, "error": self.error,
                 "camera": self.status, "video": {"viewers": self.viewers,
                 "receiving": self.producer is not None and self.frame is not None and time.monotonic() - self.last_frame_at < 5,
-                "error": self.stream_error}, "events_lost": self.events_lost}
+                "error": self.stream_error}, "events_lost": self.events_lost,
+                "mqtt": self.mqtt.status(), "control_transport": "mqtt" if self.mqtt.ready() else "http"}
 
     async def poll_once(self):
         base = self.settings.camera_url
@@ -227,11 +248,25 @@ class CameraHub:
 
     async def poll(self):
         while True:
+            if self.mqtt.ready():
+                # Fresh MQTT state/events are primary; HTTP remains the fallback.
+                self.changed.set()
+                await asyncio.sleep(1)
+                continue
             await self.poll_once()
+            self.changed.set()
             await asyncio.sleep(self.poll_interval)
 
     async def command(self, action):
         async with self.control_lock:
+            if self.mqtt.ready():
+                try:
+                    self.status = await self.mqtt.command(action)
+                    self.last_seen, self.online, self.error = now(), True, None
+                    self.changed.set()
+                    return self.state()
+                except (ConnectionError, TimeoutError, ValueError) as exc:
+                    raise HTTPException(502, "MQTT command was not confirmed. Check device status before retrying.") from exc
             try:
                 response = await self.client.post(self.settings.camera_url + "/api/live/" + action)
                 response.raise_for_status()
@@ -239,6 +274,7 @@ class CameraHub:
                 if not isinstance(status, dict) or "boot_id" not in status:
                     raise ValueError("Invalid camera status")
                 self.status, self.online, self.last_seen, self.error = status, True, now(), None
+                self.changed.set()
                 return self.state()
             except (httpx.HTTPError, ValueError) as exc:
                 raise HTTPException(502, "Camera did not respond. Check its power, IP address, and Wi-Fi.") from exc
@@ -327,8 +363,10 @@ class CameraHub:
                 self.face_last_checked, self.face_count, self.face_rejected = None, 0, 0
                 if self.viewers:
                     self.producer = asyncio.create_task(self.produce())
+            self.changed.set()
 
     async def close(self):
+        await self.mqtt.close()
         if self.face_task:
             self.face_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -348,6 +386,7 @@ def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None)
     async def lifespan(app):
         hub = CameraHub(data_dir or os.environ.get("DOORBELL_DATA_DIR", ROOT / ".local-data"), transport, poll_interval, face_engine)
         app.state.hub = hub
+        await hub.mqtt.start()
         hub.poller = asyncio.create_task(hub.poll())
         hub.face_task = asyncio.create_task(hub.recognize_faces())
         yield
@@ -381,6 +420,29 @@ def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None)
     @app.get("/api/status")
     async def status(request: Request):
         return request.app.state.hub.state()
+
+    @app.get("/api/updates")
+    async def updates(request: Request):
+        hub = request.app.state.hub
+        async def messages():
+            previous = {}
+            heartbeat = time.monotonic()
+            while not await request.is_disconnected():
+                snapshots = {"status": hub.state(), "activity": {"events": hub.events()}, "faces": hub.face_status()}
+                for kind, value in snapshots.items():
+                    payload = json.dumps(value, separators=(",", ":"))
+                    if payload != previous.get(kind):
+                        previous[kind] = payload
+                        yield f"event: {kind}\ndata: {payload}\n\n"
+                if time.monotonic() - heartbeat > 10:
+                    yield ": heartbeat\n\n"
+                    heartbeat = time.monotonic()
+                hub.changed.clear()
+                try:
+                    await asyncio.wait_for(hub.changed.wait(), timeout=1)
+                except TimeoutError:
+                    pass
+        return StreamingResponse(messages(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     @app.get("/api/events")
     async def events(request: Request):

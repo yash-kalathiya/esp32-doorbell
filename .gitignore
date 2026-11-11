@@ -7,6 +7,7 @@ models/*.onnx
 models/*.tmp
 .lwc/
 firmware/Doorbell/wifi_credentials.h
+firmware/Doorbell/mqtt_credentials.h
 .env
 .env.*
 !.env.example

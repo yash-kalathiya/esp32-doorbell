@@ -74,8 +74,10 @@ video while this page is open. It does not record video. Face monitoring is a
 separate server function with its own toggle (see below).
 The sound module supplies digital threshold events, not microphone audio.
 
-The server polls the existing firmware every two seconds; no callback setting
-or new firmware upload is required. Received events are deduplicated using
+Fresh MQTT telemetry and events are the primary path after the MQTT firmware
+is uploaded. Without a connected MQTT device, the server polls the existing
+HTTP firmware every two seconds as a fallback; that path needs no reflash.
+Received events are deduplicated using
 camera address, device ID, boot ID, and event ID. The newest 2,000 events remain
 in `.local-data/events.sqlite3` across server restarts; the newest 100 for the
 selected camera appear in the feed. Feed times indicate **first received by
@@ -85,6 +87,110 @@ credentials. The app is intended for a trusted LAN and has no user login.
 
 Source: `server/app.py` (FastAPI relay), `web/` (responsive dashboard),
 `scripts/run-dashboard.sh` (launcher).
+
+### Local MQTT setup
+
+The gateway uses Mosquitto on port **8883**, MQTT 3.1.1, QoS 1 and mutual TLS.
+Each device has a client certificate and topic ACL; anonymous connections are
+refused. The broker container mounts only its own identity/configuration, not
+the CA signing key or the device/gateway private keys.
+
+First-time setup (use the actual laptop Wi-Fi IP and the ESP32's `device_id`):
+
+```bash
+uv pip install --python .venv/bin/python -r requirements.txt
+docker pull eclipse-mosquitto:2
+.venv/bin/python scripts/setup-local-mqtt.py \
+  --broker-ip LAPTOP_WIFI_IP --device-id ESP32_DEVICE_ID --write-firmware
+.venv/bin/python scripts/run-mqtt-broker.py
+systemctl --user restart esp32-doorbell-dashboard
+```
+
+The setup creates `.local-data/mqtt/` and the Git-excluded
+`firmware/Doorbell/mqtt_credentials.h`. Compile and upload the sketch **once**
+to enable MQTT on the ESP32; a server restart cannot update board firmware.
+The topic identity must match the real board ID. The setup fails safely rather
+than silently replacing an existing CA.
+
+When changing from eduroam to the home network or hotspot, refresh the laptop
+address before compiling/uploading:
+
+```bash
+.venv/bin/python scripts/setup-local-mqtt.py \
+  --broker-ip NEW_LAPTOP_WIFI_IP --device-id ESP32_DEVICE_ID \
+  --refresh-address --write-firmware
+docker restart esp32-doorbell-mqtt
+```
+
+This preserves the CA/client identities, updates the broker certificate and the
+firmware's default broker address, and does not print private keys. Upload the
+rebuilt firmware when its broker address changes. Broker state and queued
+messages are stored under `.local-data/mqtt/broker/data/`.
+
+| Topic suffix under `doorbell/DEVICE_ID/` | Direction | Behavior |
+| --- | --- | --- |
+| `events` | ESP32 → gateway | QoS 1, not retained; deduplicated and committed to SQLite |
+| `received` | Gateway → ESP32 | Application receipt after database commit |
+| `state` | ESP32 → gateway | Retained heartbeat every 5 seconds; offline Last Will |
+| `commands` | Gateway → ESP32 | Non-retained start/stop, unique command ID, boot binding and short expiry |
+| `ack` | ESP32 → gateway | Application acknowledgement and resulting state |
+
+The ESP32 keeps up to 24 pending events in a checksum-validated NVS outbox until
+the gateway confirms storage. It retries unconfirmed events. Overflow drops the
+oldest event and increments a visible loss counter. NVS-write failure is exposed
+by `mqtt_outbox_persistent`; RAM delivery can continue, but power-loss retention
+then cannot be assumed. NVS flash endurance under sustained triggering has not
+been evaluated. Previously unconfirmed events retain their original boot IDs
+after a reboot.
+
+The broker's PUBACK is not treated as proof that the application saved an event.
+Duplicate transport deliveries and duplicate HTTP fallback observations create
+one event row, preserving its first receipt time. The `source` field shows
+`mqtt`, `http`, or `mqtt+http`.
+
+Commands are not confirmed to the UI until an application ACK arrives. Old-boot,
+expired, retained or malformed commands are rejected; recent command IDs are
+cached against duplicate execution. Historical retained-online state is not
+proof of liveness: a fresh heartbeat is required, and state expires after
+20 seconds. A Last Will or stale heartbeat moves the gateway to HTTP fallback.
+
+The dashboard's health strip shows broker connection, device MQTT status,
+selected control path and SSE live updates. Browsers receive changed status,
+activity and face data over `/api/updates`; HTTP polling is a reconnect fallback.
+
+This is the **local project milestone**. The broker transport is encrypted and
+certificate-authenticated. The existing camera HTTP API and dashboard HTTP
+listener remain LAN prototype interfaces without user login. Remote access,
+browser HTTPS deployment, WebRTC and Wi-Fi CSI sensing are outside this milestone.
+
+### Hardware validation to do after uploading
+
+Software checks do not establish that the physical sensors or board work.
+The MQTT firmware is compiled, but has not yet been uploaded to the camera.
+
+1. Join the camera and laptop to the same home Wi-Fi/hotspot, update the broker
+   address as above, then upload the sketch with the working USB wiring. Remove
+   the IO0–GND upload jumper for normal operation.
+2. Check that the dashboard shows **MQTT broker: Connected**, **Device MQTT:
+   Online**, and **Dashboard updates: Live · SSE**. Device discovery should
+   update the camera IP when its authenticated heartbeat arrives.
+3. Wait for PIR warm-up. Confirm the PIR goes clear, then trigger fresh motion.
+   Check one activity entry arrives with MQTT as its source. Repeated transport
+   deliveries must not create duplicate entries. Validate sound polarity and
+   threshold separately; an always-active input is not a successful sound test.
+4. Start and stop live view. Confirm MQTT control is selected and the command is
+   acknowledged; verify live video and a snapshot independently of telemetry.
+5. Stop the project broker, trigger a fresh event and inspect
+   `http://ESP_IP/api/status`: pending events should increase. Restart the broker;
+   confirm the event arrives and the device pending count returns to zero.
+6. Separately test power loss with an unconfirmed event, checking its persistence
+   flag first. After reboot/reconnection, verify that event arrives once with
+   its original boot ID. Measure actual video stability with TLS active.
+7. Test recognition with enrolled and unenrolled people under the intended
+   lighting, and record observed false matches/misses. Record a backup video of
+   the actual working hardware demonstration after these checks pass.
+
+Do not present the simulated-device integration test as physical sensor results.
 
 ### Name an unknown face
 
@@ -183,6 +289,7 @@ These are the laptop endpoints; the firmware endpoints below run on the camera.
 | Method | Path | Result |
 | --- | --- | --- |
 | GET | `/api/status` | Connection state, latest camera status, video relay status |
+| GET | `/api/updates` | Server-sent `status`, `activity`, `faces` updates; heartbeat and reconnect support |
 | GET | `/api/events` | Up to 100 saved events for the selected camera |
 | POST | `/api/events` | Accept and deduplicate an optional firmware callback |
 | GET | `/api/settings` | Configured camera base URL |
@@ -207,7 +314,7 @@ face checks. Preserve `camera_url` when updating this setting.
 
 ```bash
 uv pip install --python .venv/bin/python -r requirements-dev.txt
-.venv/bin/python -m pytest -q tests/test_dashboard.py tests/test_faces.py
+.venv/bin/python -m pytest -q tests/test_dashboard.py tests/test_faces.py tests/test_mqtt.py
 # With the dashboard running and Google Chrome installed:
 .venv/bin/python scripts/check-dashboard.py
 ```
@@ -237,22 +344,40 @@ release and the insecure-origin HTTPS guidance. It is not an evaluation of new
 viewpoints, household accuracy, physical webcams or mobile browser permissions.
 No test identities or sample images are inserted into the running gallery.
 
+MQTT integration testing uses a real Mosquitto container, fresh test identities,
+an isolated database and a simulated device. It tests TLS client authentication,
+QoS 1 delivery, application receipts, deduplication, start/stop ACKs, broker
+restart recovery and Last Will offline detection:
+
+```bash
+.venv/bin/python scripts/check-mqtt.py
+g++ -std=c++17 -Wall -Wextra -Werror tests/doorbell_delivery_test.cpp -o /tmp/doorbell-delivery-test
+/tmp/doorbell-delivery-test
+```
+
+The integration script removes only its own temporary broker. It never sends
+test events to the running household broker. The host C++ tests cover bounded
+outbox overflow, reboot restoration/checksum validation, ACK ordering, duplicate
+commands, stale boot IDs, expiry and uptime rollover. These do not validate
+physical NVS behavior, TLS heap use or real GPIO wiring on the board.
+
 ## Current communication and Wi-Fi sensing path
 
-The camera and laptop communicate over **HTTP over TCP/IP on Wi-Fi**. Both join
-the same router/LAN; the ESP32 is the HTTP server and the laptop initiates pulls.
+The camera and laptop communicate over the same home LAN. **MQTT over TLS**
+carries events, telemetry and commands when MQTT firmware is active. **HTTP over
+TCP/IP** carries video/snapshots and remains the legacy/fallback control path.
 
 | Data | Connection | Format |
 | --- | --- | --- |
 | Live camera video | Laptop GET `http://ESP_IP:81/api/stream` | MJPEG: successive JPEG images in an HTTP multipart response |
-| Status and sensor events | Laptop GET port 80 `/api/status`, `/api/events` about every two seconds | JSON |
+| Status and sensor events | MQTT TLS port 8883; HTTP `/api/status`, `/api/events` fallback | JSON |
 | Snapshot | Laptop GET port 80 `/api/snapshot` | JPEG |
-| Live controls | Laptop POST port 80 `/api/live/start`, `/api/live/stop` | HTTP request / JSON response |
+| Live controls | MQTT command + application ACK; HTTP port 80 fallback | JSON |
 | Optional sensor callback | ESP32 POST to the configured laptop event URL | JSON over HTTP |
-| Phone dashboard | Browser connects to laptop port 8000 | HTTP, JSON polling, relayed MJPEG |
+| Phone dashboard | Browser connects to laptop port 8000 | HTTP, SSE updates, relayed MJPEG |
 | Device-camera recognition test | Browser POST `/api/faces/test` about every two seconds | Sampled JPEG frames in multipart form data |
 
-There is no WebRTC, RTSP, MQTT or CSI transport in the current camera firmware.
+There is no WebRTC, RTSP or CSI transport in the current camera firmware.
 USB serial is used for uploading/debugging, not normal power-bank operation.
 
 **CSI research is not enabled in this project yet.** Espressif documents CSI

@@ -1,5 +1,6 @@
 const $ = (id) => document.getElementById(id);
 let state = null, viewing = false, busy = false, connectingAt = 0;
+let updatesConnected = false;
 let autoLive = localStorage.getItem('doorbell-auto-live') !== 'false';
 $('auto-live').checked = autoLive;
 const text = (id, value) => { $(id).textContent = value; };
@@ -45,6 +46,12 @@ function render() {
   const online = Boolean(state?.online), c = state?.camera || {};
   $('connection').className = 'connection ' + (online ? 'online' : 'offline');
   text('connection-label', online ? 'Camera connected' : 'Camera offline');
+  const mqtt = state?.mqtt || {};
+  text('mqtt-broker-state', !mqtt.configured ? 'Not configured' : mqtt.broker_connected ? 'Connected · TLS' : 'Disconnected');
+  text('mqtt-device-state', mqtt.device_online ? 'Online' : 'Waiting for device');
+  text('control-transport', state?.control_transport === 'mqtt' ? 'MQTT · ACK required' : 'HTTP fallback');
+  text('dashboard-updates', updatesConnected ? 'Live · SSE' : 'Polling fallback');
+  text('mqtt-detail', !mqtt.configured ? 'MQTT setup is available from the project launcher.' : mqtt.error || (!mqtt.broker_connected ? 'Local MQTT broker unavailable. HTTP fallback remains active.' : mqtt.device_online ? `${mqtt.events_received} MQTT event deliveries · pending device events: ${c.mqtt_pending_events ?? '—'} · lost: ${c.mqtt_events_lost ?? '—'}` : 'Broker connected. The ESP32 must be running the MQTT firmware on the same LAN.'));
   $('start').disabled = !online || busy || Boolean(c.manual_live);
   $('stop').disabled = !online || busy || (!viewing && !c.manual_live);
   $('snapshot').disabled = !online || busy;
@@ -63,7 +70,7 @@ function render() {
   text('placeholder-text', !online ? state?.error || 'Check the camera address and Wi-Fi connection.' : viewing ? state?.video.error || 'Waiting for video from your ESP32-CAM.' : 'Select Start live, or let sensor activity bring up the video.');
   $('placeholder-settings').hidden = online && !state?.video.error;
   text('video-footnote', receiving ? 'Live view · Relayed through your laptop' : 'Video stays on your local network');
-  text('activity-footer', online ? 'Checking for activity every 2 seconds' : 'History saved · Camera offline');
+  text('activity-footer', online ? mqtt.device_online ? 'MQTT events · live dashboard updates' : 'HTTP fallback · checking every 2 seconds' : 'History saved · Camera offline');
   const fresh = online ? '' : 'Last reported · ';
   text('wifi-value', typeof c.rssi === 'number' ? `${c.rssi} dBm` : '—');
   text('wifi-detail', c.rssi != null ? fresh + (c.rssi > -60 ? 'Strong signal' : c.rssi > -75 ? 'Fair signal' : 'Weak signal') : 'Waiting for camera');
@@ -94,7 +101,7 @@ function renderEvents(events) {
     icon.innerHTML = `<svg aria-hidden="true"><use href="#i-${sound ? 'sound' : 'motion'}"/></svg>`;
     const content = document.createElement('div'); content.className = 'event-content';
     const title = document.createElement('h3'); title.textContent = sound ? 'Sound detected' : event.type === 'motion' ? 'Motion detected' : 'Sensor event';
-    const detail = document.createElement('p'); detail.textContent = `Camera uptime ${duration(event.uptime_ms)} · #${event.id}`;
+    const detail = document.createElement('p'); detail.textContent = `Camera uptime ${duration(event.uptime_ms)} · #${event.id}${event.source ? ' · ' + event.source.toUpperCase() : ''}`;
     content.append(title, detail);
     const time = document.createElement('time'); time.dateTime = event.received_at;
     const received = new Date(event.received_at);
@@ -104,6 +111,7 @@ function renderEvents(events) {
   }));
 }
 async function refresh() {
+  if (updatesConnected) { setTimeout(refresh, 2000); return; }
   try {
     const [next, activity] = await Promise.all([api('/api/status'), api('/api/events')]);
     state = next; render(); renderEvents(activity.events);
@@ -286,7 +294,7 @@ $('face-monitoring').addEventListener('change', async event => {
   } catch(error) { input.checked = !input.checked; toast(error.message); }
   finally { input.disabled = false; faceSettingsBusy = false; await refreshFaces(); }
 });
-async function pollFaces() { await refreshFaces(); setTimeout(pollFaces, 3000); }
+async function pollFaces() { if (!updatesConnected) await refreshFaces(); setTimeout(pollFaces, 3000); }
 pollFaces();
 
 let uploadBusy = false, previewUrls = [];
@@ -479,3 +487,13 @@ $('device-camera-start').addEventListener('click', async () => {
 $('device-camera-stop').addEventListener('click', () => stopDeviceCamera('Device camera stopped. Test frames were not saved.'));
 document.addEventListener('visibilitychange', () => { if (document.hidden && deviceStream) stopDeviceCamera('Device camera stopped while the page was hidden.'); });
 window.addEventListener('pagehide', () => stopDeviceCamera());
+
+if (window.EventSource) {
+  const updates = new EventSource('/api/updates');
+  updates.addEventListener('open', () => { updatesConnected = true; text('dashboard-updates', 'Live · SSE'); });
+  updates.addEventListener('status', event => { state = JSON.parse(event.data); render(); });
+  updates.addEventListener('activity', event => renderEvents(JSON.parse(event.data).events));
+  updates.addEventListener('faces', event => renderFaceData(JSON.parse(event.data)));
+  updates.addEventListener('error', () => { updatesConnected = false; text('dashboard-updates', 'Polling fallback'); });
+  window.addEventListener('pagehide', () => updates.close());
+}

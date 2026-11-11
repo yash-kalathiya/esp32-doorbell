@@ -1,5 +1,27 @@
 # ESP32 doorbell
 
+A local smart doorbell with ESP32-CAM video, PIR and sound events, a phone-friendly
+dashboard, and face recognition on a laptop using YuNet + SFace. MQTT over mutual
+TLS carries device events and commands; HTTP carries MJPEG video.
+
+## Dashboard screenshots
+
+Captured from the running dashboard. The desktop and phone-width views show the
+real device connected through MQTT, SSE updates, and saved sensor activity.
+Camera imagery is masked for privacy; personal face photos and names are omitted.
+The phone view uses a mobile browser viewport on the laptop.
+
+![Desktop dashboard with MQTT connection health, live-view controls, and motion and sound activity](docs/screenshots/dashboard-desktop.png)
+
+| Phone layout | Photo enrollment |
+| --- | --- |
+| <img src="docs/screenshots/dashboard-mobile.png" alt="Dashboard at a 390-pixel phone viewport" width="280"> | <img src="docs/screenshots/face-photo-upload.png" alt="Upload face photos and enter a name to enroll a person" width="480"> |
+
+Face recognition can be tested with an uploaded photo or the browser device's
+camera without adding test images to the saved gallery:
+
+![Face recognition controls with device-camera and photo-upload test options](docs/screenshots/face-recognition.png)
+
 ## First setup after cloning
 
 ```bash
@@ -163,12 +185,16 @@ certificate-authenticated. The existing camera HTTP API and dashboard HTTP
 listener remain LAN prototype interfaces without user login. Remote access,
 browser HTTPS deployment, WebRTC and Wi-Fi CSI sensing are outside this milestone.
 
-### Hardware validation to do after uploading
+### Hardware validation
 
-Software checks do not establish that the physical sensors or board work.
-The MQTT firmware is compiled, but has not yet been uploaded to the camera.
+The MQTT firmware has been uploaded to the physical ESP32-CAM. Live checks on
+November 11, 2026 confirmed an authenticated MQTT connection, a received motion
+event, a cleared pending-event queue, and the video relay receiving frames.
+Sound events were received through HTTP before this upload; a fresh sound event
+through MQTT, restart recovery, and recognition accuracy still need validation.
+Software and simulated-device checks do not establish those hardware results.
 
-1. Join the camera and laptop to the same home Wi-Fi/hotspot, update the broker
+1. For a new setup, join the camera and laptop to the same home Wi-Fi/hotspot, update the broker
    address as above, then upload the sketch with the working USB wiring. Remove
    the IO0–GND upload jumper for normal operation.
 2. Check that the dashboard shows **MQTT broker: Connected**, **Device MQTT:

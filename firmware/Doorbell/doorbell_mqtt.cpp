@@ -8,6 +8,7 @@
 #include "doorbell_api.h"
 #include "doorbell_mqtt.h"
 #include "doorbell_delivery.h"
+#include "doorbell_diagnostics.h"
 
 #if __has_include("mqtt_credentials.h")
 #include "mqtt_credentials.h"
@@ -104,12 +105,25 @@ void receive(const Inbound &message) {
 
 void mqttEvent(void *, esp_event_base_t, int32_t eventId, void *eventData) {
   auto *event = static_cast<esp_mqtt_event_handle_t>(eventData);
-  if (eventId == MQTT_EVENT_CONNECTED) {
+  if (eventId == MQTT_EVENT_BEFORE_CONNECT) {
+    doorbellDiagnosticsMqttAttempt();
+  } else if (eventId == MQTT_EVENT_CONNECTED) {
     connected = true;
+    doorbellDiagnosticsMqttConnected();
     esp_mqtt_client_subscribe(client, commandTopic, 1);
     esp_mqtt_client_subscribe(client, receiptTopic, 1);
   } else if (eventId == MQTT_EVENT_DISCONNECTED) {
     connected = false;
+    doorbellDiagnosticsMqttDisconnected();
+  } else if (eventId == MQTT_EVENT_ERROR && event->error_handle) {
+    const auto *error = event->error_handle;
+    bool transport = error->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT;
+    doorbellDiagnosticsMqttError(error->error_type,
+        transport ? error->esp_tls_last_esp_err : 0,
+        transport ? error->esp_tls_stack_err : 0,
+        transport ? error->esp_tls_cert_verify_flags : 0,
+        transport ? error->esp_transport_sock_errno : 0,
+        error->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED ? error->connect_return_code : 0);
   } else if (eventId == MQTT_EVENT_DATA) {
     if (event->current_data_offset || event->data_len != event->total_data_len || event->data_len <= 0 ||
         event->data_len >= static_cast<int>(sizeof(Inbound::body))) { ++rejected; return; }

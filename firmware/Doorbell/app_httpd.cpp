@@ -16,6 +16,7 @@
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "esp_camera.h"
+#include "doorbell_diagnostics.h"
 #include "img_converters.h"
 #include "fb_gfx.h"
 #include "esp32-hal-ledc.h"
@@ -103,13 +104,21 @@ void enable_led(bool en) {  // Turn LED On or Off
 }
 #endif
 
+static camera_fb_t *diagnostic_frame_get() {
+  uint32_t started = millis();
+  doorbellDiagnosticsCaptureBegin();
+  camera_fb_t *frame = esp_camera_fb_get();
+  doorbellDiagnosticsCaptureEnd(frame != nullptr, uint32_t(millis() - started));
+  return frame;
+}
+
 static esp_err_t bmp_handler(httpd_req_t *req) {
   camera_fb_t *fb = NULL;
   esp_err_t res = ESP_OK;
 #if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
   int64_t fr_start = esp_timer_get_time();
 #endif
-  fb = esp_camera_fb_get();
+  fb = diagnostic_frame_get();
   if (!fb) {
     log_e("Camera capture failed");
     httpd_resp_send_500(req);
@@ -165,10 +174,10 @@ static esp_err_t capture_handler(httpd_req_t *req) {
 #if defined(LED_GPIO_NUM)
   enable_led(true);
   vTaskDelay(150 / portTICK_PERIOD_MS);  // The LED needs to be turned on ~150ms before the call to esp_camera_fb_get()
-  fb = esp_camera_fb_get();              // or it won't be visible in the frame. A better way to do this is needed.
+  fb = diagnostic_frame_get();           // or it won't be visible in the frame. A better way to do this is needed.
   enable_led(false);
 #else
-  fb = esp_camera_fb_get();
+  fb = diagnostic_frame_get();
 #endif
 
   if (!fb) {
@@ -247,7 +256,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   doorbellStreamClient(true);
   while (true) {
     if (gated && !doorbellLiveActive()) break;
-    fb = esp_camera_fb_get();
+    fb = diagnostic_frame_get();
     if (!fb) {
       log_e("Camera capture failed");
       res = ESP_FAIL;
@@ -285,6 +294,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
       free(_jpg_buf);
       _jpg_buf = NULL;
     }
+    doorbellDiagnosticsStream(res == ESP_OK);
     if (res != ESP_OK) {
       log_e("Send frame failed");
       break;

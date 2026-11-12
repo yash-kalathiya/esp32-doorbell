@@ -4,6 +4,7 @@
 #include <WiFiMulti.h>
 #include "doorbell_api.h"
 #include "doorbell_mqtt.h"
+#include "doorbell_diagnostics.h"
 
 // ===========================
 // Select camera model in board_config.h
@@ -31,6 +32,7 @@ void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println();
+  doorbellDiagnosticsBegin();
 
   camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -122,7 +124,6 @@ void setup() {
   doorbellBegin();
 
   WiFi.mode(WIFI_STA);
-  doorbellMqttBegin();
   WiFi.setSleep(false);
   wifiMulti.addAP(ssid, password);
   if (homeSsid[0] != '\0') {
@@ -140,6 +141,8 @@ void setup() {
   Serial.println("");
   Serial.println("WiFi connected");
 
+  // Avoid transport failures before the station has a usable IP address.
+  doorbellMqttBegin();
   startCameraServer();
 
   Serial.print("Camera Ready! Use 'http://");

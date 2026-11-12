@@ -9,6 +9,7 @@
 #include "doorbell_config.h"
 #include "doorbell_logic.h"
 #include "doorbell_mqtt.h"
+#include "doorbell_diagnostics.h"
 
 namespace {
 DoorbellLogic logic(DOORBELL_ACTIVITY_MS, DOORBELL_PIR_WARMUP_MS,
@@ -131,6 +132,7 @@ cJSON *statusJson() {
   cJSON_AddNumberToObject(json, "callback_last_status", deliveryStatus);
   cJSON_AddStringToObject(json, "stream_path", ":81/api/stream");
   doorbellMqttStatus(json);
+  doorbellDiagnosticsStatus(json);
   return json;
 }
 

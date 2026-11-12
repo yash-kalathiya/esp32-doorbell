@@ -185,6 +185,51 @@ certificate-authenticated. The existing camera HTTP API and dashboard HTTP
 listener remain LAN prototype interfaces without user login. Remote access,
 browser HTTPS deployment, WebRTC and Wi-Fi CSI sensing are outside this milestone.
 
+### Connection diagnostics firmware
+
+The diagnostic build identifies itself as `"firmware_version":"mqtt-diag-1"`
+in the ESP32's `/api/status` response and MQTT state. Upload the complete
+`firmware/Doorbell/` sketch, including its new `doorbell_diagnostics.cpp` and
+`.h` tabs. The broker configuration does not need an update for this build.
+
+After uploading, remove the IO0–GND jumper with power disconnected, restart the
+board, and open `http://ESP32_IP/api/status`. The laptop's `/api/status` also
+includes these fields under `camera` when it receives fresh device status.
+
+| Field under `diagnostics` | What it helps distinguish |
+| --- | --- |
+| `reset_name`, `reset_reason` | Power-on, watchdog, panic or brownout reset reported by the chip |
+| `memory` | Current/minimum free internal heap, largest free internal block and free PSRAM, in bytes |
+| `wifi` | IP connection/disconnect counts and the last Wi-Fi disconnect reason |
+| `mqtt` | Connection attempts, successful connections, disconnects and errors |
+| `mqtt.last_error` | Error type, ESP/TLS codes, certificate flags, socket errno, broker code and internal heap sampled at the error |
+| `camera` | Capture failures/durations, captures currently in progress, completed stream frames and stream errors |
+
+The last MQTT error stays available after reconnecting; `last_error` is `null`
+until an error occurs. Counts and error details reset on reboot and are scoped
+to the response's `boot_id`. Event times are milliseconds since boot; `unix_time`
+shows the board's wall clock for investigating certificate validity. Numeric
+Wi-Fi reasons and TLS/certificate codes must be interpreted for the installed
+ESP32 SDK, rather than treated as proof of a power or memory fault.
+
+Serial Monitor at **115200 baud** also prints concise `[diag]` connection/error
+lines. MQTT now starts after Wi-Fi obtains an IP, avoiding the observed startup
+transport attempts before Wi-Fi was ready. The runtime MQTT timeout and TLS
+certificate verification are unchanged. This build adds visibility; a fix for
+the intermittent runtime disconnects or camera stalls has not been verified.
+
+The native diagnostic serializer test uses fake hardware inputs with the real
+cJSON library. It verifies retained error details across reconnect, capture
+tracking, and message size, without claiming a physical-board result:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_firmware_diagnostics.py
+```
+
+It requires `g++`, the system `libcjson` runtime and the ESP32 SDK cJSON header;
+it skips if they are missing. `ESP32_JSON_INCLUDE` can select a different SDK
+header directory. The Arduino firmware compile remains the target-board check.
+
 ### Hardware validation
 
 The MQTT firmware has been uploaded to the physical ESP32-CAM. Live checks on

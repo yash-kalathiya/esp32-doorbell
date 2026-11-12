@@ -5,10 +5,12 @@
 #include <sys/time.h>
 #include <time.h>
 #include <math.h>
+#include <esp_heap_caps.h>
 #include "doorbell_api.h"
 #include "doorbell_mqtt.h"
 #include "doorbell_delivery.h"
 #include "doorbell_diagnostics.h"
+#include "doorbell_memory.h"
 
 #if __has_include("mqtt_credentials.h")
 #include "mqtt_credentials.h"
@@ -20,9 +22,13 @@
 namespace {
 volatile bool configured = false, connected = false, persistent = false;
 volatile uint32_t pending = 0, lost = 0, rejected = 0;
+volatile uint32_t publishFailures = 0;
+bool inboxPsram = false;
 #if DOORBELL_HAS_MQTT
 esp_mqtt_client_handle_t client = nullptr;
 QueueHandle_t inbox = nullptr;
+StaticQueue_t inboxControl;
+uint8_t *inboxStorage = nullptr;
 DoorbellOutbox outbox;
 DoorbellCommands commands;
 Preferences storage;
@@ -30,26 +36,36 @@ char baseTopic[96], eventTopic[112], stateTopic[112], ackTopic[112], commandTopi
 char will[160];
 struct Inbound { bool receipt, retained; char body[512]; };
 
+void deleteInbox() {
+  if (inbox) { vQueueDelete(inbox); inbox = nullptr; }
+  heap_caps_free(inboxStorage); inboxStorage = nullptr;
+  inboxPsram = false;
+}
+
 void persist() {
   auto snapshot = outbox.snapshot();
   persistent = storage.putBytes("outbox", &snapshot, sizeof(snapshot)) == sizeof(snapshot);
   pending = outbox.count(); lost = outbox.lost();
 }
 
-void publishJson(const char *topic, cJSON *json, bool retained = false) {
+void publishJson(const char *topic, cJSON *json, int qos = 1, bool retained = false) {
   if (!json) return;
-  char *text = cJSON_PrintUnformatted(json);
+  char *text = doorbellMqttJsonPrint(json);
   cJSON_Delete(json);
   if (text) {
-    esp_mqtt_client_enqueue(client, topic, text, 0, 1, retained, true);
+    // Presence is a replaceable current value: don't retain stale heartbeats
+    // in the QoS-1 retry outbox. Events and command ACKs still use QoS 1.
+    int result = qos == 0 ? esp_mqtt_client_publish(client, topic, text, 0, 0, retained)
+                          : esp_mqtt_client_enqueue(client, topic, text, 0, qos, retained, true);
+    if (result < 0) ++publishFailures;
     cJSON_free(text);
-  }
+  } else ++publishFailures;
 }
 
 void publishState() {
   cJSON *state = doorbellStatusJson();
   if (state) cJSON_AddBoolToObject(state, "online", true);
-  publishJson(stateTopic, state, true);
+  publishJson(stateTopic, state, 0, true);
 }
 
 bool number(cJSON *json, const char *name, uint32_t &value) {
@@ -190,6 +206,12 @@ void doorbellMqttStatus(cJSON *json) {
   cJSON_AddNumberToObject(json, "mqtt_pending_events", pending);
   cJSON_AddNumberToObject(json, "mqtt_events_lost", lost);
   cJSON_AddNumberToObject(json, "mqtt_messages_rejected", rejected);
+  cJSON_AddNumberToObject(json, "mqtt_publish_failures", publishFailures);
+  cJSON_AddBoolToObject(json, "mqtt_inbox_psram", inboxPsram);
+  // Payload storage only; kernel queue bookkeeping is additional.
+#if DOORBELL_HAS_MQTT
+  cJSON_AddNumberToObject(json, "mqtt_inbox_storage_bytes", inbox ? 16 * sizeof(Inbound) : 0);
+#endif
 }
 
 void doorbellMqttBegin() {
@@ -211,8 +233,14 @@ void doorbellMqttBegin() {
     timeval initial = {DOORBELL_MQTT_BUILD_EPOCH, 0}; settimeofday(&initial, nullptr);
   }
   configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
-  inbox = xQueueCreate(16, sizeof(Inbound));
-  if (!inbox) return;
+  // Neither producer nor consumer accesses this queue from an ISR. Keep the
+  // same capacity. Kernel queue bookkeeping stays internal; only item storage
+  // moves to PSRAM. No ISR or cache-disabled callback touches these items.
+  inboxPsram = doorbellJsonUsesPsram();
+  uint32_t queueCaps = MALLOC_CAP_8BIT | (inboxPsram ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL);
+  inboxStorage = static_cast<uint8_t *>(heap_caps_malloc(16 * sizeof(Inbound), queueCaps));
+  if (inboxStorage) inbox = xQueueCreateStatic(16, sizeof(Inbound), inboxStorage, &inboxControl);
+  if (!inbox) { deleteInbox(); Serial.println("MQTT inbox allocation failed"); return; }
   esp_mqtt_client_config_t config = {};
   config.broker.address.hostname = DOORBELL_MQTT_HOST;
   config.broker.address.port = DOORBELL_MQTT_PORT;
@@ -229,13 +257,23 @@ void doorbellMqttBegin() {
   config.session.last_will.retain = 1;
   config.network.reconnect_timeout_ms = 3000;
   config.network.timeout_ms = 3000;
-  config.buffer.size = 2048;
+  // Commands/receipts are bounded to 511 bytes. Larger outgoing status/ACK
+  // packets are fragmented by ESP-MQTT; they do not require a 2-KiB I/O buffer.
+  config.buffer.size = 1024;
+  config.buffer.out_size = 1024;
   config.outbox.limit = 8192;
   client = esp_mqtt_client_init(&config);
-  if (!client) return;
+  if (!client) { deleteInbox(); return; }
   esp_mqtt_client_register_event(client, MQTT_EVENT_ANY, mqttEvent, nullptr);
-  if (esp_mqtt_client_start(client) != ESP_OK) return;
+  if (esp_mqtt_client_start(client) != ESP_OK) {
+    esp_mqtt_client_destroy(client); client = nullptr;
+    deleteInbox(); return;
+  }
   configured = xTaskCreate(task, "doorbell-mqtt", 6144, nullptr, 1, nullptr) == pdPASS;
-  if (!configured) { esp_mqtt_client_stop(client); Serial.println("MQTT worker could not start"); }
+  if (!configured) {
+    esp_mqtt_client_stop(client); esp_mqtt_client_destroy(client); client = nullptr;
+    deleteInbox();
+    Serial.println("MQTT worker could not start");
+  }
 #endif
 }

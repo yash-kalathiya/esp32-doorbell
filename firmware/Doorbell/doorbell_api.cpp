@@ -10,6 +10,7 @@
 #include "doorbell_logic.h"
 #include "doorbell_mqtt.h"
 #include "doorbell_diagnostics.h"
+#include "doorbell_memory.h"
 
 namespace {
 DoorbellLogic logic(DOORBELL_ACTIVITY_MS, DOORBELL_PIR_WARMUP_MS,
@@ -133,6 +134,8 @@ cJSON *statusJson() {
   cJSON_AddStringToObject(json, "stream_path", ":81/api/stream");
   doorbellMqttStatus(json);
   doorbellDiagnosticsStatus(json);
+  cJSON *diagnostics = cJSON_GetObjectItemCaseSensitive(json, "diagnostics");
+  doorbellMemoryStatus(cJSON_GetObjectItemCaseSensitive(diagnostics, "memory"));
   return json;
 }
 

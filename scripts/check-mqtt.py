@@ -61,7 +61,8 @@ async def main():
                 return 65000 + int((time.monotonic() - started) * 1000)
             def state():
                 return {"device_id": "qa-device", "boot_id": "1234abcd", "online": True,
-                    "uptime_ms": uptime(), "manual_live": manual, "stream_allowed": manual}
+                    "uptime_ms": uptime(), "manual_live": manual, "stream_allowed": manual,
+                    "test_padding": "x" * 1300}
             def on_connect(client, userdata, flags, reason, properties):
                 nonlocal connection_count
                 if not reason.is_failure:
@@ -90,10 +91,12 @@ async def main():
             await until(lambda: connected.is_set() and hub.mqtt.connected)
             async def pulses():
                 while True:
-                    device.publish("doorbell/qa-device/state", json.dumps(state()), qos=1, retain=True)
+                    device.publish("doorbell/qa-device/state", json.dumps(state()), qos=0, retain=True)
                     await asyncio.sleep(.3)
             heartbeat = asyncio.create_task(pulses())
             await until(hub.mqtt.ready)
+            assert len(json.dumps(state())) > 1024
+            assert hub.mqtt.last_state["test_padding"] == "x" * 1300
             event = {"device_id":"qa-device", "boot_id":"1234abcd", "id":1, "type":"motion", "uptime_ms":uptime()}
             for _ in range(2):
                 device.publish("doorbell/qa-device/events", json.dumps(event), qos=1)
@@ -141,6 +144,7 @@ async def main():
             assert not hub.mqtt.status()["device_online"]
             print(json.dumps({"source":"real local Mosquitto broker; simulated device; isolated database",
                 "mutual_tls":True, "unauthenticated_client_rejected":True, "qos1_event_receipt":True,
+                "qos0_heartbeat":True, "state_over_1024_bytes_received":True,
                 "duplicate_event_deduplication":True, "mqtt_start_stop_acknowledged":True,
                 "broker_restart_recovered":True, "last_will_offline":True, "stored_events":len(hub.events())}))
         except Exception:

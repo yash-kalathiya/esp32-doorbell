@@ -5,6 +5,7 @@
 #include "doorbell_api.h"
 #include "doorbell_mqtt.h"
 #include "doorbell_diagnostics.h"
+#include "doorbell_memory.h"
 
 // ===========================
 // Select camera model in board_config.h
@@ -32,6 +33,7 @@ void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println();
+  doorbellMemoryBegin();
   doorbellDiagnosticsBegin();
 
   camera_config_t config = {};

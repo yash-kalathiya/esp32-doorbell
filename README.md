@@ -153,7 +153,7 @@ messages are stored under `.local-data/mqtt/broker/data/`.
 | --- | --- | --- |
 | `events` | ESP32 → gateway | QoS 1, not retained; deduplicated and committed to SQLite |
 | `received` | Gateway → ESP32 | Application receipt after database commit |
-| `state` | ESP32 → gateway | Retained heartbeat every 5 seconds; offline Last Will |
+| `state` | ESP32 → gateway | Retained QoS 0 heartbeat every 5 seconds; QoS 1 offline Last Will |
 | `commands` | Gateway → ESP32 | Non-retained start/stop, unique command ID, boot binding and short expiry |
 | `ack` | ESP32 → gateway | Application acknowledgement and resulting state |
 
@@ -187,8 +187,9 @@ browser HTTPS deployment, WebRTC and Wi-Fi CSI sensing are outside this mileston
 
 ### Connection diagnostics firmware
 
-The diagnostic build identifies itself as `"firmware_version":"mqtt-diag-1"`
-in the ESP32's `/api/status` response and MQTT state. Upload the complete
+The first diagnostic build identified itself as `mqtt-diag-1`; the current
+optimized build reports `"firmware_version":"mqtt-mem-1"` in the ESP32's
+`/api/status` response and MQTT state. Upload the complete
 `firmware/Doorbell/` sketch, including its new `doorbell_diagnostics.cpp` and
 `.h` tabs. The broker configuration does not need an update for this build.
 
@@ -229,6 +230,78 @@ tracking, and message size, without claiming a physical-board result:
 It requires `g++`, the system `libcjson` runtime and the ESP32 SDK cJSON header;
 it skips if they are missing. `ESP32_JSON_INCLUDE` can select a different SDK
 header directory. The Arduino firmware compile remains the target-board check.
+
+### Internal memory optimization (`mqtt-mem-1`)
+
+Physical testing of `mqtt-diag-1` caught internal free heap dropping to a
+48-byte minimum while video and TLS ran together. TLS reported SSL/MPI allocation
+failures, despite roughly 3.4 MB of unused PSRAM and zero recorded Wi-Fi drops.
+The installed Arduino SDK builds mbedTLS with internal-memory allocation.
+
+This build reserves more internal heap for networking by changing application
+allocations:
+
+- Install cJSON allocation hooks once, before camera/network tasks start, so
+  JSON trees, keys, strings and serialized output use PSRAM. Boards without
+  PSRAM retain an internal-memory path. On a PSRAM board, failed PSRAM JSON
+  allocations are reported rather than silently consuming TLS's internal heap.
+- Move the MQTT inbox's **8,224-byte item storage** to PSRAM, preserving all 16
+  slots and the 511-byte incoming-message bound. Queue bookkeeping and task
+  stacks stay internal; the queue is accessed only from tasks, never an ISR.
+- Reduce MQTT input/output buffers from 2,048 to 1,024 bytes each, removing
+  **2,048 bytes** of buffer demand. ESP-MQTT supports larger outgoing payloads
+  through fragmentation. Application JSON remains bounded below 4 KiB for MQTT;
+  HTTP event-history JSON keeps its existing variable size.
+- Send replaceable retained heartbeats at QoS 0, directly from the worker,
+  instead of accumulating stale state copies in the QoS 1 retry outbox. A lost
+  heartbeat is replaced by the next one. Events, application receipts, commands,
+  command ACKs and the offline Last Will retain their reliable delivery paths.
+
+TLS verification, certificates, the durable sensor-event outbox, camera frame
+size and task-stack sizes are preserved. JSON serialization uses a bounded
+4-KiB PSRAM output buffer to avoid repeated growth/copy allocations. This trades
+available PSRAM for internal-heap headroom; it does not claim every message uses
+less total RAM. The changed buffers/queue account for about 10 KiB less dynamic
+internal storage demand, before JSON and heartbeat-copy savings.
+
+**Verification before uploading:**
+
+| Check | Diagnostic build | Optimized build |
+| --- | --- | --- |
+| Arduino static globals | 76,224 bytes | 76,344 bytes |
+| Arduino program storage | 1,292,897 bytes | 1,294,309 bytes |
+| MQTT I/O buffer settings | 4,096 bytes combined | 2,048 bytes combined |
+| MQTT inbox payload allocation | 8,224 internal bytes | 8,224 PSRAM bytes |
+| Controlled native JSON internal allocation peak | 31,041 host bytes | 0 host bytes |
+| Same native workload, combined allocation peak | 31,041 host bytes | 31,041 host bytes |
+
+The 120-byte increase in static globals includes internal queue bookkeeping
+previously allocated dynamically. Arduino's static-global figure does not
+measure runtime heap consumption. The native comparison uses the real cJSON
+library and firmware allocation hooks, simulated heap capabilities, three
+concurrent 70-field JSON documents, and the same 4-KiB output buffer in both
+passes. Host pointer sizes and allocator overhead differ from the ESP32; these
+counts verify routing, not physical free heap. A further 2,000 threaded
+create/serialize/free cycles left no live tracked allocations. Tests also cover
+no-PSRAM operation, allocation failure and oversized-message rejection.
+
+All 46 Python/native checks passed. An isolated real Mosquitto/mutual-TLS test
+with a simulated device passed QoS 0 heartbeat delivery (including a state
+larger than 1,024 bytes), QoS 1 event deduplication/receipts, command ACKs, broker
+restart and offline Last Will. It does not test ESP32 transport fragmentation
+or physical TLS/video stability. The firmware compiles for AI Thinker ESP32-CAM.
+
+After uploading, check `firmware_version`, `diagnostics.memory.json_psram`,
+`mqtt_inbox_psram`, and `mqtt_inbox_storage_bytes`. Compare the internal heap
+minimum/largest block and disconnect/error counters during simultaneous video
+and MQTT over several minutes. A new boot resets the heap minimum and counters.
+**The optimized build's actual heap margin and disconnect rate still require
+this physical upload/test.** No broker configuration change is needed.
+
+Implementation references: [Espressif heap capabilities](https://docs.espressif.com/projects/esp-idf/en/release-v5.5/esp32/api-reference/system/mem_alloc.html),
+[PSRAM restrictions](https://docs.espressif.com/projects/esp-idf/en/release-v5.5/esp32/api-guides/external-ram.html),
+[ESP-MQTT publication, buffering and fragmentation](https://docs.espressif.com/projects/esp-idf/en/release-v5.5/esp32/api-reference/protocols/mqtt.html),
+and [cJSON allocation hooks, preallocated printing and thread safety](https://github.com/DaveGamble/cJSON).
 
 ### Hardware validation
 

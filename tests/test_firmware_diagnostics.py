@@ -23,6 +23,7 @@ def test_diagnostics_survive_reconnect_and_fit_mqtt(tmp_path):
 #include <cstdint>
 extern uint32_t clockMs;
 inline uint32_t millis() { return clockMs; }
+inline bool psramFound() { return true; }
 struct Console { template<class... Args> void printf(const char *, Args...) {} };
 inline Console Serial;
 using portMUX_TYPE = int;
@@ -43,8 +44,11 @@ inline Wifi WiFi;
         "esp_heap_caps.h": """
 #pragma once
 #include <cstdint>
+#include <cstdlib>
 constexpr uint32_t MALLOC_CAP_INTERNAL=1, MALLOC_CAP_8BIT=2, MALLOC_CAP_SPIRAM=4;
 extern uint32_t available, largest;
+inline void *heap_caps_malloc(size_t size, uint32_t) { return std::malloc(size); }
+inline void heap_caps_free(void *p) { std::free(p); }
 inline uint32_t heap_caps_get_free_size(uint32_t caps) { return caps==MALLOC_CAP_SPIRAM ? 3000000 : available; }
 inline uint32_t heap_caps_get_largest_free_block(uint32_t) { return largest; }
 inline uint32_t heap_caps_get_minimum_free_size(uint32_t) { return 1500; }
@@ -65,12 +69,14 @@ inline esp_reset_reason_t esp_reset_reason() { return ESP_RST_TASK_WDT; }
 #include <cstring>
 #include <WiFi.h>
 #include "doorbell_diagnostics.h"
+#include "doorbell_memory.h"
 uint32_t clockMs=0, available=4000, largest=2500;
 cJSON *at(cJSON *j, const char *key) { auto *v=cJSON_GetObjectItemCaseSensitive(j,key); assert(v); return v; }
 int main() {
+  doorbellMemoryBegin();
   doorbellDiagnosticsBegin();
   cJSON *initial=cJSON_CreateObject(); doorbellDiagnosticsStatus(initial);
-  assert(!strcmp(at(initial,"firmware_version")->valuestring,"mqtt-diag-1"));
+  assert(!strcmp(at(initial,"firmware_version")->valuestring,"mqtt-mem-1"));
   assert(cJSON_IsNull(at(at(at(initial,"diagnostics"),"mqtt"),"last_error")));
   cJSON_Delete(initial);
   clockMs=100;
@@ -99,10 +105,12 @@ int main() {
   clockMs=UINT32_MAX; available=UINT32_MAX; largest=UINT32_MAX;
   doorbellDiagnosticsMqttError(INT_MAX,INT_MIN,INT_MIN,INT_MAX,INT_MAX,INT_MAX);
   j=cJSON_CreateObject(); doorbellDiagnosticsStatus(j); d=at(j,"diagnostics");
+  doorbellMemoryStatus(at(d,"memory"));
+  assert(cJSON_IsTrue(at(at(d,"memory"),"json_psram")));
   assert(at(at(d,"camera"),"capture_failures")->valueint==1);
   assert(at(at(d,"camera"),"captures_in_flight")->valueint==0);
   assert(at(at(d,"camera"),"max_capture_duration_ms")->valueint==4000);
-  char *text=cJSON_PrintUnformatted(j); assert(text);
+  char *text=doorbellMqttJsonPrint(j); assert(text);
   // Keep at least 2 KiB of the broker/gateway's 4 KiB limit for existing status or ACK fields.
   assert(strlen(text)<2048);
   cJSON *decoded=cJSON_Parse(text); assert(decoded);
@@ -114,5 +122,6 @@ int main() {
     subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
         f"-I{tmp_path}", f"-I{include}", f"-I{ROOT / 'firmware/Doorbell'}",
         str(harness), str(ROOT / "firmware/Doorbell/doorbell_diagnostics.cpp"),
+        str(ROOT / "firmware/Doorbell/doorbell_memory.cpp"),
         f"-l:{library}", "-o", str(binary)], check=True, capture_output=True, text=True)
     subprocess.run([str(binary)], check=True, capture_output=True, text=True)

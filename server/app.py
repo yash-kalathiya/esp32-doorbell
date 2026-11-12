@@ -118,6 +118,7 @@ class CameraHub:
         self.last_seen_at = 0
         self.error = "Waiting for the first camera check."
         self.boot_id = None
+        self.observed_boot = None
         self.cursor = 0
         self.events_lost = 0
         self.condition = asyncio.Condition()
@@ -154,12 +155,23 @@ class CameraHub:
     timestamp = staticmethod(now)
 
     def mark_seen(self):
+        boot = ((self.status or {}).get("device_id"), (self.status or {}).get("boot_id"))
+        if self.observed_boot is not None and boot != self.observed_boot:
+            self.frame = self.snapshot_frame = self.face_overlay = None
+        self.observed_boot = boot
         self.last_seen, self.last_seen_at = now(), time.monotonic()
 
+    def csi_active(self):
+        return self.csi.enabled or (self.status or {}).get("csi_pilot", {}).get("enabled", False)
+
     async def camera_snapshot(self, base, max_age=2):
+        if self.csi_active():
+            raise HTTPException(409, "Stop the CSI pilot before taking camera photos.")
         # Face monitoring and lighting share one idle snapshot, with no new ESP32
         # frame buffer and no second live stream.
         async with self.snapshot_lock:
+            if self.csi_active():
+                raise HTTPException(409, "Stop the CSI pilot before taking camera photos.")
             cached = self.snapshot_frame
             if cached and cached[0] == base and time.monotonic() - cached[1] < max_age:
                 return cached[2]
@@ -193,19 +205,19 @@ class CameraHub:
             if current_device != device:
                 self.light = AutomaticLight()
                 self.light_sampled_at, device = 0, current_device
-            if self.online and current_device[1] and time.monotonic() - self.light_sampled_at >= 3:
+            if self.online and not self.csi_active() and current_device[1] and time.monotonic() - self.light_sampled_at >= 3:
                 base = self.settings.camera_url
                 try:
                     jpeg = self.frame if self.frame is not None and time.monotonic() - self.last_frame_at < 2 else await self.camera_snapshot(base)
                     brightness = await asyncio.to_thread(frame_brightness, jpeg)
                     if current_device == (self.settings.camera_url, (self.status or {}).get("boot_id")):
                         self.light.update(brightness, time.monotonic())
-                except (httpx.HTTPError, ValueError, OSError):
+                except (httpx.HTTPError, HTTPException, ValueError, OSError):
                     # Unknown/stale brightness never forces the lamp on.
                     self.light.samples = 0
                 self.light_sampled_at = time.monotonic()
             key = self.controls_key()
-            if self.online and key[1] and key != self.camera_controls_key and (key != retry_key or time.monotonic() >= retry_at):
+            if self.online and not self.csi_active() and key[1] and key != self.camera_controls_key and (key != retry_key or time.monotonic() >= retry_at):
                 try:
                     await self.apply_camera_controls(key[0], key[2], key[3])
                     if self.controls_key() == key:
@@ -273,7 +285,7 @@ class CameraHub:
         previous_frame = -1
         last_observed_at = 0
         while True:
-            if self.settings.face_monitoring and self.online:
+            if self.settings.face_monitoring and self.online and not self.csi_active():
                 base, generation = self.settings.camera_url, self.config_generation
                 try:
                     receiving = self.producer is not None and self.frame is not None and time.monotonic() - self.last_frame_at < 5
@@ -416,6 +428,8 @@ class CameraHub:
 
     async def command(self, action):
         async with self.control_lock:
+            if action == "start" and self.csi_active():
+                await self.configure_csi(False)
             if self.mqtt.ready():
                 try:
                     self.status = await self.mqtt.command(action)
@@ -439,8 +453,14 @@ class CameraHub:
                 raise HTTPException(502, "Camera did not respond. Check its power, IP address, and Wi-Fi.") from exc
 
     async def produce(self):
+        retry_delay = 2
         try:
             while self.viewers:
+                if self.csi_active() or (self.status is not None and (not self.online or not self.status.get("stream_allowed", True))):
+                    self.frame = None
+                    self.stream_error = "Video paused during CSI capture." if self.csi_active() else "Waiting for camera availability or activity."
+                    await asyncio.sleep(1)
+                    continue
                 try:
                     host = urlsplit(self.settings.camera_url).hostname
                     async with self.client.stream("GET", f"http://{host}:81/api/stream", timeout=httpx.Timeout(12, connect=3)) as response:
@@ -468,6 +488,7 @@ class CameraHub:
                                     self.frame_id += 1
                                     self.last_frame_at = time.monotonic()
                                     self.stream_error = None
+                                    retry_delay = 2
                                     self.condition.notify_all()
                             if len(buffer) > 4 * 1024 * 1024:
                                 raise ValueError("Camera frame exceeded 4 MB")
@@ -475,7 +496,8 @@ class CameraHub:
                 except (httpx.HTTPError, ValueError):
                     self.stream_error = "Video unavailable. Close other direct camera streams, or try Start live again."
                 self.frame = None
-                await asyncio.sleep(2)
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(15, retry_delay * 2)
         finally:
             self.frame = None
 
@@ -554,15 +576,17 @@ class CameraHub:
                 raise HTTPException(409, "Upload csi-pilot-1 to the ESP32, connect it, then start the pilot.")
             if enabled and self.csi.port is None:
                 raise HTTPException(503, self.csi.error or "CSI receiver is unavailable.")
+            if enabled and (self.viewers or self.producer is not None or (self.status or {}).get("manual_live")):
+                raise HTTPException(409, "Stop live video before starting CSI. Video and CSI run separately to protect ESP32 memory.")
             base = self.settings.camera_url
             host = urlsplit(base).hostname
             local = None
-            if enabled:
-                # Route lookup only: connect on a UDP socket sends no packet.
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
-                    route.connect((host, 80))
-                    local = route.getsockname()[0]
             try:
+                if enabled:
+                    # Route lookup only: connect on a UDP socket sends no packet.
+                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+                        route.connect((host, 80))
+                        local = route.getsockname()[0]
                 response = await self.client.post(base + "/api/csi/config", json={
                     "enabled": enabled, "host": local or "", "port": self.csi.port or 5005}, headers={"Connection": "close"})
                 response.raise_for_status()
@@ -917,6 +941,8 @@ def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None,
     @app.get("/api/snapshot")
     async def snapshot(request: Request):
         hub = request.app.state.hub
+        if hub.csi_active():
+            raise HTTPException(409, "Stop the CSI pilot before taking camera photos.")
         try:
             response = await hub.client.get(hub.settings.camera_url + "/api/snapshot")
             response.raise_for_status()

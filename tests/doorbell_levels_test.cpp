@@ -25,18 +25,20 @@ int main() {
   logic.observe(800, true, L::SoundPulse{}); logic.observe(900, true, L::SoundPulse{});
   assert(logic.motionTriggerCount() == 2 && logic.motionActiveEvent() == 3);
   // Pulse completed between 20-ms samples: preserve actual edge timestamps.
-  logic.observe(1000, true, L::SoundPulse{true, true, 992, 994});
-  assert(logic.soundTriggerCount() == 1 && logic.soundActiveEvent() == 0);
+  logic.observe(3000, true, L::SoundPulse{true, true, 2992, 2994});
+  assert(logic.soundTriggerCount() == 1 && logic.soundActiveEvent() == 4);
   L::Event events[L::capacity]; auto count = logic.copyAfter(0, events, L::capacity);
-  assert(count == 5 && events[3].type == L::EventType::Sound && events[3].uptimeMs == 992);
-  assert(events[4].type == L::EventType::SoundCleared && events[4].uptimeMs == 994);
-  logic.observe(1100, true, L::SoundPulse{true, true, 1090, 1098});
-  assert(logic.newestId() == 5); // Cooldown suppresses the whole pair.
-  logic.observe(4000, true, L::SoundPulse{true, false, 3999, 0});
+  assert(count == 4 && events[3].type == L::EventType::Sound && events[3].uptimeMs == 2992);
+  logic.observe(3100, true, L::SoundPulse{true, true, 3090, 3098});
+  assert(logic.newestId() == 4);
+  logic.observe(5100, true, L::SoundPulse{});
+  assert(logic.newestId() == 5 && logic.soundActiveEvent() == 0);
+  logic.observe(6200, true, L::SoundPulse{true, false, 6199, 0});
   assert(logic.soundTriggerCount() == 2 && logic.soundActiveEvent() == 6);
-  logic.observe(4100, true, L::SoundPulse{false, true, 3999, 4090});
+  logic.observe(6300, true, L::SoundPulse{false, true, 6199, 6290});
+  assert(logic.newestId() == 6);
+  logic.observe(8300, true, L::SoundPulse{});
   assert(logic.newestId() == 7 && logic.soundActiveEvent() == 0);
-  logic.observe(4120, true, L::SoundPulse{}); assert(logic.newestId() == 7);
   // NVS record layout stays unchanged; both legacy starts and new ends restore.
   static_assert(sizeof(DoorbellOutbox::Record) == 16, "Outbox migration required");
   DoorbellOutbox outbox;

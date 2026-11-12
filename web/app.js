@@ -18,7 +18,7 @@ function renderSensorTiming() {
     text(`${kind}-timing`, !timing?.supported ? `${title}: timing firmware update needed` : !row ? `${title}: unavailable` :
       `${title}: ${row.level ? 'HIGH' : 'LOW'}${row.level === row.active_level ? ' · active' : ' · idle'}${row.level_for_ms == null ? ' · last known' : ' for ' + sensorDuration(row.level_for_ms)} · ${row.trigger_count} alert${row.trigger_count === 1 ? '' : 's'} this boot${(row.active_level ? row.last_high_ms : row.last_low_ms) != null ? ' · last active ' + sensorDuration(row.active_level ? row.last_high_ms : row.last_low_ms) : ''}`);
   }
-  text('timing-help', !timing?.supported ? 'Upload night-light-1 to measure levels and completed activity periods.' : timing.stale ? 'Camera status is stale; live duration is paused.' : 'PIR triggers on HIGH. Sound triggers on LOW; short pulses are grouped by its alert cooldown.');
+  text('timing-help', !timing?.supported ? 'Upload night-light-1 to measure levels and completed activity periods.' : timing.stale ? 'Camera status is stale; live duration is paused.' : state?.camera?.sensor_policy ? 'PIR triggers on HIGH. Sound pulses form one incident until quiet for 2 seconds. Automatic video is capped at 30 seconds. Sound levels are sampled every 20 ms during interrupt holdoff; shorter changes may be missed.' : 'PIR triggers on HIGH. Sound triggers on LOW; upload reliable-1 for incident grouping.');
 }
 function toast(message) {
   text('toast', message); $('toast').hidden = false;
@@ -77,8 +77,8 @@ function render() {
   $('start').disabled = !online || busy || Boolean(c.manual_live);
   $('stop').disabled = !online || busy || (!viewing && !c.manual_live);
   $('snapshot').disabled = !online || busy;
-  const shouldView = online && (Boolean(c.manual_live) || (autoLive && Boolean(c.stream_allowed)));
-  if (!online || (!c.manual_live && !autoLive)) setViewing(false);
+  const shouldView = online && (Boolean(c.manual_live) || (autoLive && !state?.csi?.enabled && !c.csi_pilot?.enabled && Boolean(c.stream_allowed)));
+  if (!online || state?.csi?.enabled || c.csi_pilot?.enabled || (!c.manual_live && !autoLive)) setViewing(false);
   else if (shouldView && !render.paused) setViewing(true);
   else if (!shouldView) { setViewing(false); render.paused = false; }
   const receiving = viewing && Boolean(state?.video.receiving);
@@ -96,7 +96,7 @@ function render() {
   const fresh = online ? '' : 'Last reported · ';
   text('wifi-value', typeof c.rssi === 'number' ? `${c.rssi} dBm` : '—');
   text('wifi-detail', c.rssi != null ? fresh + (c.rssi > -60 ? 'Strong signal' : c.rssi > -75 ? 'Fair signal' : 'Weak signal') : 'Waiting for camera');
-  text('motion-value', c.pir_enabled === false ? 'Disabled' : c.motion_active != null ? c.motion_active ? 'Active' : 'Clear' : '—');
+  text('motion-value', c.sensor_policy?.pir_stuck_high ? 'Check sensor' : c.pir_enabled === false ? 'Disabled' : c.motion_active != null ? c.motion_active ? 'Active' : 'Clear' : '—');
   text('motion-detail', c.pir_enabled === false ? 'Disabled in firmware' : c.pir_ready != null ? fresh + (c.pir_ready ? 'PIR input · GPIO 13' : 'Sensor warming up') : 'Waiting for camera');
   text('sound-value', c.sound_enabled === false ? 'Disabled' : c.sound_input_level != null ? c.sound_input_level === (c.sound_active_low ? 0 : 1) ? 'Triggered' : 'Quiet' : '—');
   text('sound-detail', c.sound_input_level != null ? fresh + 'Digital threshold · no audio' : 'Digital threshold · no audio');
@@ -104,7 +104,9 @@ function render() {
   text('uptime-detail', c.device_id ? fresh + c.device_id : 'Waiting for camera');
   const notices = [];
   if (state?.events_lost) notices.push('Some camera events were overwritten before the laptop received them.');
-  if (online && c.motion_active) notices.push('PIR input is active. A continuously HIGH signal keeps the activity window open; new motion entries appear after it clears and triggers again.');
+  if (online && c.sensor_policy?.pir_stuck_high) notices.push('PIR has stayed HIGH for too long. Check its wiring and power; automatic video is time-limited.');
+  else if (online && c.motion_active) notices.push(c.sensor_policy ? 'PIR input is active. Automatic video is limited to 30 seconds; a new motion incident requires the input to clear.' : 'PIR input is active. Upload reliable-1 for bounded automatic video and sensor fault handling.');
+  if (online && c.sensor_policy?.sound_noisy) notices.push('Sound input remains noisy or active. Pulses are grouped; automatic video is time-limited.');
   $('notice').hidden = !notices.length; text('notice', notices.join(' '));
 }
 let eventSignature = '';
@@ -395,8 +397,8 @@ function renderCsi() {
   $('csi-stop').disabled = csiBusy || (!pilot.enabled && !camera.csi_pilot?.enabled);
   $('csi-calibrate').disabled = csiBusy || !pilot.enabled || pilot.rate_hz < 5 || pilot.state === 'calibrating';
   $('csi-empty').disabled = $('csi-walking').disabled = csiBusy || !pilot.enabled || pilot.rate_hz < 5 || Boolean(pilot.trial);
-  const info = !supported ? 'Upload csi-pilot-1 to enable the CSI pilot.' : !state?.online ? 'Camera offline. Reconnect it before starting.' : pilot.error || pilot.calibration_error || (pilot.state === 'calibrating' ? `Keep the room empty · ${pilot.calibration_remaining_s}s remaining.` : pilot.state === 'uncalibrated' ? 'Live packets are arriving. Leave the room, then calibrate for 60 seconds.' : pilot.state === 'low_rate' ? 'Need at least 5 packets/s for analysis. Check the radio link and router responses.' : pilot.state === 'no_data' ? 'No fresh CSI packets. Check the pilot, UDP port 5005 and camera connection.' : pilot.enabled ? 'Live CSI signal changes · 20 Hz capture target · automatic stop after 10 minutes.' : pilot.reason || 'Ready to start.');
-  text('csi-help', info);
+  const info = !supported ? 'Upload reliable-1 to enable the CSI pilot.' : !state?.online ? 'Camera offline. Reconnect it before starting.' : pilot.error || pilot.calibration_error || (pilot.state === 'calibrating' ? `Keep the room empty · ${pilot.calibration_remaining_s}s remaining.` : pilot.state === 'uncalibrated' ? 'Live packets are arriving. Leave the room, then calibrate for 60 seconds.' : pilot.state === 'low_rate' ? 'Need at least 5 packets/s for analysis. Check the radio link and router responses.' : pilot.state === 'no_data' ? 'No fresh CSI packets. Check the pilot, UDP port 5005 and camera connection.' : pilot.enabled ? `Live CSI signal changes · ${camera.csi_pilot?.target_hz || 10} Hz capture target · video paused · automatic stop after 10 minutes.` : pilot.reason || 'Ready to start.');
+  text('csi-help', info + (!pilot.enabled && (state?.video?.viewers || camera.manual_live) ? ' Stop live video before starting CSI.' : ''));
   text('csi-rate', pilot.enabled ? `${pilot.rate_hz || 0} Hz` : '—');
   text('csi-rssi', pilot.rssi != null ? `${pilot.rssi} dBm` : '—');
   text('csi-gaps', pilot.enabled ? String(pilot.sequence_gaps || 0) : '—');

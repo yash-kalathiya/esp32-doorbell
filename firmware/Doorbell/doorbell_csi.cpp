@@ -13,7 +13,7 @@
 #include "doorbell_csi_wire.h"
 
 namespace {
-constexpr unsigned slots = 4, intervalMs = 50, leaseMs = 600000;
+constexpr unsigned slots = 4, intervalMs = 100, leaseMs = 600000;
 struct Frame { uint16_t length; uint8_t bytes[DoorbellCsiWire::headerBytes + DoorbellCsiWire::maxIqBytes]; };
 static_assert(sizeof(Frame) == 278, "Bound CSI queue storage");
 StaticQueue_t queueControl;
@@ -22,6 +22,8 @@ SemaphoreHandle_t control = nullptr;
 QueueHandle_t queue = nullptr;
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 bool enabled = false, mustStop = false, subscribed = false;
+bool starting = false;
+unsigned cameraUsers = 0;
 const char *stopReason = "Disabled at boot";
 uint32_t lastHealth = 0;
 uint8_t apMac[6] = {};
@@ -114,7 +116,13 @@ static esp_err_t configureLocked(bool on, const char *host, unsigned port) {
 esp_err_t doorbellCsiConfigure(bool on, const char *host, unsigned port) {
   if (!control) control = xSemaphoreCreateMutexStatic(&controlBuffer);
   if (!control || xSemaphoreTake(control, pdMS_TO_TICKS(1000)) != pdTRUE) return ESP_ERR_TIMEOUT;
+  portENTER_CRITICAL(&mux);
+  bool busy = on && cameraUsers > 0;
+  starting = on && !busy;
+  portEXIT_CRITICAL(&mux);
+  if (busy) { xSemaphoreGive(control); return ESP_ERR_INVALID_STATE; }
   esp_err_t result = configureLocked(on, host, port);
+  portENTER_CRITICAL(&mux); starting = false; portEXIT_CRITICAL(&mux);
   xSemaphoreGive(control);
   return result;
 }
@@ -152,6 +160,23 @@ void doorbellCsiPoll() {
   xSemaphoreGive(control);
 }
 
+bool doorbellCsiActive() {
+  portENTER_CRITICAL(&mux); bool active = enabled; portEXIT_CRITICAL(&mux);
+  return active;
+}
+
+bool doorbellCsiCameraBegin() {
+  portENTER_CRITICAL(&mux);
+  bool accepted = !enabled && !starting;
+  if (accepted) ++cameraUsers;
+  portEXIT_CRITICAL(&mux);
+  return accepted;
+}
+
+void doorbellCsiCameraEnd() {
+  portENTER_CRITICAL(&mux); if (cameraUsers) --cameraUsers; portEXIT_CRITICAL(&mux);
+}
+
 void doorbellCsiStatus(cJSON *root) {
   bool on; uint32_t initial, received, lost, delivered, failed, remaining;
   char host[16]; unsigned port; const char *reason;
@@ -165,8 +190,9 @@ void doorbellCsiStatus(cJSON *root) {
   if (!json) return;
   cJSON_AddStringToObject(json, "reason", reason);
   cJSON_AddBoolToObject(json, "supported", true); cJSON_AddBoolToObject(json, "enabled", on);
+  cJSON_AddBoolToObject(json, "exclusive_camera", true);
   cJSON_AddStringToObject(json, "host", host); cJSON_AddNumberToObject(json, "port", port);
-  cJSON_AddNumberToObject(json, "sequence_start", initial); cJSON_AddNumberToObject(json, "target_hz", 20);
+  cJSON_AddNumberToObject(json, "sequence_start", initial); cJSON_AddNumberToObject(json, "target_hz", 1000/intervalMs);
   cJSON_AddNumberToObject(json, "captured", received); cJSON_AddNumberToObject(json, "queue_drops", lost);
   cJSON_AddNumberToObject(json, "sent", delivered); cJSON_AddNumberToObject(json, "send_errors", failed);
   cJSON_AddNumberToObject(json, "lease_remaining_ms", remaining);

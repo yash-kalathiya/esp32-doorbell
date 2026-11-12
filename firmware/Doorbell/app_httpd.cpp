@@ -24,6 +24,7 @@
 #include "camera_index.h"
 #include "board_config.h"
 #include "doorbell_api.h"
+#include "doorbell_csi.h"
 
 #if defined(ARDUINO_ARCH_ESP32) && defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
@@ -164,7 +165,17 @@ static size_t jpg_encode_stream(void *arg, size_t index, const void *data, size_
   return len;
 }
 
+struct CameraUse {
+  bool acquired = doorbellCsiCameraBegin();
+  ~CameraUse() { if (acquired) doorbellCsiCameraEnd(); }
+};
+
 static esp_err_t capture_handler(httpd_req_t *req) {
+  CameraUse cameraUse;
+  if (!cameraUse.acquired) {
+    httpd_resp_set_status(req, "409 Conflict");
+    return httpd_resp_sendstr(req, "Stop CSI before taking camera photos");
+  }
   camera_fb_t *fb = NULL;
   esp_err_t res = ESP_OK;
 #if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
@@ -220,6 +231,11 @@ static esp_err_t capture_handler(httpd_req_t *req) {
 }
 
 static esp_err_t stream_handler(httpd_req_t *req) {
+  CameraUse cameraUse;
+  if (!cameraUse.acquired) {
+    httpd_resp_set_status(req, "409 Conflict");
+    return httpd_resp_sendstr(req, "Stop CSI before opening live video");
+  }
   // The stock /stream remains a direct manual-view endpoint. The new API
   // stream is permitted only during a manual request or sensor activity.
   const bool gated = strncmp(req->uri, "/api/stream", 11) == 0;
@@ -246,7 +262,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   }
 
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-  httpd_resp_set_hdr(req, "X-Framerate", "60");
+  httpd_resp_set_hdr(req, "X-Framerate", "10");
 
 #if defined(LED_GPIO_NUM)
   isStreaming = true;
@@ -312,6 +328,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
       "MJPG: %" PRIu32 "B %" PRId32 "ms (%.1ffps), AVG: %" PRIu32 "ms (%.1ffps)", (uint32_t)_jpg_buf_len, (int32_t)frame_time, 1000.0 / frame_time,
       avg_frame_time, 1000.0 / avg_frame_time
     );
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 
   doorbellStreamClient(false);

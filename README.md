@@ -38,6 +38,73 @@ Git. The model download script installs verified weights separately.
 
 ## Laptop dashboard
 
+### Reliability update: reliable-1
+
+Upload the complete `firmware/Doorbell/` sketch for this update. Automatic video
+now has a fixed **30-second window**; further sensor pulses do not extend it.
+Manual live viewing remains available. Sound pulses are one incident until
+**two seconds of quiet**, with a minimum three seconds between accepted starts.
+The first sound incident also requires quiet after startup. A PIR staying HIGH
+for 60 seconds after its accepted start, or a sound incident lasting 60 seconds,
+is reported as sensor trouble. Raw inputs and ongoing motion remain visible;
+the firmware does not invent a clear event. A faulty PIR cannot keep automatic
+video running or prevent a healthy sound input from eventually rearming.
+
+The sound input uses a direct IRAM GPIO handler instead of Arduino's
+flash-resident interrupt trampoline. The pin interrupt is masked for at least
+200 ms after each interrupt; the sensor task samples it every 20 ms meanwhile.
+This bounds interrupt work, but raw sound period counts/durations are sampled
+during that holdoff and can miss short changes. Sound incident duration includes
+the quiet rearm interval; it is not the duration or loudness of recorded audio.
+The input is a digital threshold detector and no audio is recorded.
+
+The camera uses one PSRAM frame buffer, initializes at VGA and starts streaming
+at QVGA. Live transmission is capped at 10 FPS. **CSI and camera requests run
+separately**: stop live video before starting CSI. During CSI the gateway pauses
+automatic viewing, background face snapshots and automatic lighting work.
+Manual Start live first requires confirmation that CSI stopped. Firmware also
+excludes overlapping CSI and snapshot/stream requests. CSI remains off after
+boot, Wi-Fi loss or its lease/heap stop; restarting it needs a new calibration.
+Its capture target is 10 Hz; the receiver still requires at least 5 Hz.
+
+Gateway stream retries back off up to 15 seconds and pause while the camera is
+offline, idle or capturing CSI. A new boot invalidates cached photos/overlays,
+while profiles, settings and event history remain stored on the laptop.
+Build verification and simulated interruptions are separate from the physical
+checks below. Sustained hardware stability and CSI classification still require
+measurement before relying on intrusion-alert fusion.
+
+Measured on the uploaded `reliable-1`, November 12, 2026:
+
+- A 121-second video/MQTT observation received 1,109 JPEG frames in one boot.
+  MQTT stayed online in every sample, Wi-Fi/MQTT disconnect counts stayed zero,
+  and the stream-error counter stayed at its starting value of 1. Sampled free
+  internal heap stayed at or above 9,152 bytes; since-boot low-water was 4,492.
+  This is a short test, not long-duration qualification.
+- With the project broker stopped, 18 pending events were retained through a
+  user-confirmed power loss. After power and broker recovery, all 18 original
+  event IDs were received through MQTT, each stored once, and the pending queue
+  returned to zero. The historical cumulative lost-event counter did not rise.
+- Restarting the laptop dashboard restored its saved settings, four profiles,
+  nine enrollment samples and event history, and reconnected to the same device
+  boot. Counts describe the test state, not bundled demonstration identities.
+- PIR OUT disconnected from IO13 produced LOW. Reconnecting it produced HIGH;
+  reseating/power cycling did not resolve prolonged HIGH. Its hardware fault
+  remains open, and is reported without falsely clearing motion. The user has
+  no multimeter, so the exact sensor/wiring/supply cause has not been measured.
+
+Software verification: 80 automated tests plus explicit native sensor harnesses
+passed. Isolated CSI browser checks, real-model enrollment browser checks and a
+real TLS broker with a simulated device passed. None substitutes for the physical
+network-interruption or repeated labelled CSI trials still in progress.
+
+Primary implementation references: [Espressif GPIO interrupt service](https://github.com/espressif/esp-idf/blob/v5.5.2/components/esp_driver_gpio/src/gpio.c),
+[ESP32 PSRAM restrictions](https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32/api-guides/external-ram.html),
+and the installed Arduino 3.3.12 `esp32-hal-gpio.c` trampoline. A captured
+`csi-pilot-1` cache-disabled GPIO-dispatch panic matched its saved ELF hash;
+the direct IRAM handler removes the observed flash-handler hazard. It does not
+establish a cause for every previous reset.
+
 The dashboard runs on your laptop and works in a phone browser on the same
 Wi-Fi. It relays live MJPEG video, offers Start/Stop and downloadable snapshots,
 shows camera/sensor status, saves received motion/sound events locally, and
@@ -125,11 +192,10 @@ reconnection/reboot and their confirmation is shown beside the button. Older
 firmware can use the existing `/control` endpoint until the new sketch is uploaded.
 
 Open `firmware/Doorbell/Doorbell.ino` with **all files in that sketch directory**
-and upload once. The build identifies itself as `csi-pilot-1`; it includes the
-prior memory optimizations and sensor timing. Compilation used **1,301,549 bytes
-of flash and 76,744 bytes of static RAM**. All 76 automated tests and the isolated
-real-model browser checks passed. Physical lighting thresholds and persistence
-still require validation after upload.
+and upload once. The current build identifies itself as `reliable-1`; it includes
+the memory optimizations, incident policy, sensor timing and CSI/video isolation.
+Compilation used **1,302,301 bytes of flash and 76,312 bytes of static RAM**.
+Software checks and physical reliability results are recorded separately below.
 
 ### Live face labels and sensor durations
 
@@ -150,10 +216,10 @@ The Activity panel shows each pin's **HIGH/LOW state**, how long that level has
 been observed, the last completed active duration, and accepted alert count for
 the current boot. PIR is active **HIGH**; the current sound module is active
 **LOW**, so a sound HIGH period is idle time. A continuously HIGH PIR produces
-one motion activation until it clears and rises again. Sound alerts still use
-the existing cooldown; short raw pin periods are not separate accepted alerts.
+one motion activation until it clears and rises again. Sound pulses are grouped into incidents until two seconds of quiet;
+short raw pin periods are not separate accepted alerts.
 
-Upload the current `csi-pilot-1` firmware for timing support; it includes the
+Upload the current `reliable-1` firmware for timing support; it includes the
 `mqtt-mem-1` PSRAM optimizations. The laptop overlay works without this reflash.
 Status includes `sensor_timing_version: 1` and `sensor_levels` with current
 level duration, HIGH/LOW period counts, completed durations, current active
@@ -279,7 +345,7 @@ The first diagnostic build identified itself as `mqtt-diag-1`; the memory
 optimization build reports `"firmware_version":"mqtt-mem-1"` in the ESP32's
 `/api/status` response and MQTT state. Upload the complete
 `firmware/Doorbell/` sketch, including its new `doorbell_diagnostics.cpp` and
-`.h` tabs. The current `csi-pilot-1` build includes those optimizations, sensor timing,
+`.h` tabs. The current `reliable-1` build includes those optimizations, sensor timing,
 Night mode and optional CSI capture. Neither build needs a broker configuration update.
 
 After uploading, remove the IO0–GND jumper with power disconnected, restart the
@@ -637,7 +703,7 @@ stay on the router's 5 GHz band if both bands share the same LAN. No additional
 CSI hardware is required to attempt capture. Human detection accuracy and useful
 coverage are not established by the software tests.
 
-Upload the complete **`csi-pilot-1`** sketch. CSI is **off at every boot** and
+Upload the complete **`reliable-1`** sketch. CSI is **off at every boot** and
 configuration is runtime-only. No new firmware upload is needed to start/stop
 subsequent sessions or change the laptop destination. The dashboard derives its
 reachable LAN address when **Start pilot** is selected. A boot, Wi-Fi disconnect,
@@ -645,7 +711,7 @@ internal heap pressure or ten-minute lease ends capture; restart and recalibrate
 afterward.
 
 The firmware requests LLTF CSI from the associated AP only, stimulates responses
-with bounded ICMP echo requests, and caps accepted frames at **20 Hz**. It does
+with bounded ICMP echo requests, and caps accepted frames at **10 Hz**. It does
 not enable promiscuous capture, change channels or allocate an additional RTOS
 worker stack. A four-slot **1,112-byte PSRAM queue** separates the Wi-Fi callback
 from socket sending. The callback performs bounded framing/copying only.
@@ -675,7 +741,7 @@ the baseline. These are project heuristics, not a validated human classifier.
 1. Keep the camera and router fixed. Upload `firmware/Doorbell/Doorbell.ino` with
    all sketch tabs, remove the IO0–GND jumper with power off, then reboot normally.
 2. Refresh the dashboard and select **Wi-Fi → Start pilot**. Check actual packet
-   rate; 20 Hz is a capture limit/target, not a guaranteed delivered rate.
+   rate; 10 Hz is a capture limit/target, not a guaranteed delivered rate.
 3. If no packets arrive, check the displayed stop reason, the laptop destination,
    UDP port 5005/firewall and router ICMP responses. Do not substitute simulated
    results. `DOORBELL_CSI_PORT` changes the laptop's UDP listen port if necessary.
@@ -683,9 +749,10 @@ the baseline. These are project heuristics, not a validated human classifier.
    consistent during the 60-second baseline.
 5. Expand **Record a pilot trial**. Record **empty room · 30s**, then a separate
    **walking · 30s** run with someone moving through the intended area. Export CSVs.
-6. Repeat with video running. Compare change scores, packet gaps, internal heap,
-   MQTT availability and stream errors. Repeat with non-human disturbances such
-   as a fan to assess false detections before building any intrusion rule.
+6. Keep video stopped throughout the CSI trial. Compare change scores, packet
+   gaps, internal heap, MQTT availability and stream errors across repeated runs.
+   Test non-human disturbances such as a fan before building any intrusion rule.
+   Test video stability separately; this build excludes simultaneous CSI/video.
 
 CSV and JSON summaries are stored locally under `.local-data/csi/`. Only aggregate
 signal/health measurements are written, not raw I/Q frames or camera images.
@@ -711,7 +778,7 @@ the observed intervals. Empty-room calibration completed. A sampled 60-second
 interval with video receiving produced 1,653 additional stream frames, MQTT
 online at every sample and no added stream errors.
 
-A later internal-heap guard stopped CSI while video was running. The camera
+On the older `csi-pilot-1` firmware, a later internal-heap guard stopped CSI while video was running. The camera
 remained online. Boot low-water readings during the recorded trials fell to 1,472 bytes, so
 long-running combined operation is not qualified. The guard was
 kept; no successful continuous-operation claim is made.

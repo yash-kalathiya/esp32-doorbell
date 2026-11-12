@@ -12,6 +12,9 @@ constexpr unsigned long DOORBELL_ACTIVITY_MS = 30000;
 constexpr unsigned long DOORBELL_PIR_WARMUP_MS = 60000;
 constexpr unsigned long DOORBELL_SOUND_SETTLE_MS = 2000;
 constexpr unsigned long DOORBELL_SOUND_COOLDOWN_MS = 3000;
+constexpr unsigned long DOORBELL_SOUND_QUIET_MS = 2000;
+constexpr unsigned long DOORBELL_SENSOR_FAULT_MS = 60000;
+constexpr unsigned long DOORBELL_SOUND_IRQ_HOLDOFF_MS = 200;
 constexpr unsigned long DOORBELL_CALLBACK_RETRY_MS = 5000;
 
 // Optional laptop endpoint, e.g. http://192.168.1.20:8000/api/events.

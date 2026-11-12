@@ -4,6 +4,191 @@ A local smart doorbell with ESP32-CAM video, PIR and sound events, a phone-frien
 dashboard, and face recognition on a laptop using YuNet + SFace. MQTT over mutual
 TLS carries device events and commands; HTTP carries MJPEG video.
 
+## Demo video and teammate guide
+
+**[Open the demo video](docs/demo/demo_video.mp4)** · 2 min 45 sec · 720p MP4 · 18.3 MB
+
+If GitHub does not play the file, select **Download raw file** and open it locally.
+After cloning, the same recording is at `docs/demo/demo_video.mp4`. This is an
+edited demonstration of the real hardware and dashboard; the on-screen clock
+jumps between some actions, so it is not a continuous stability or latency test.
+
+| Approximate video time | What to check |
+| --- | --- |
+| 00:00–00:43 | ESP32-CAM, PIR and sound module assembly; dashboard moves from offline to connected/standby. Activity cards show completed sound durations. |
+| 00:44–01:07 | Live ESP32 video and face overlays. A matched face can receive a name; an uncertain detection displays **Face candidate**. |
+| 01:08–01:39 | **People**: review an unknown capture, enter a name and save. The saved-person count changes from four to five. The ESP32 burst option is visible; the recording confirms the saved profile, not eight accepted new samples. |
+| 01:40–02:08 | Stop viewing and start **Wi-Fi sensing**. Live CSI packets arrive; an uncalibrated session leaves Security watch unavailable. |
+| 02:09–02:45 | Calibrated CSI graph with threshold about **0.0551**, **Armed away**, elevated/quiet signal states, a new possible-intrusion card and its acknowledgement. |
+
+The alert in the video demonstrates the local rule and review workflow. It does
+not establish who caused the signal change or validate theft detection. The
+recording does not show a full empty-room calibration, a photo-upload session,
+or a controlled human/non-human comparison.
+
+### What is included
+
+| Part | Current behavior |
+| --- | --- |
+| Camera | Shared live video, snapshots, manual Start/Stop and fixed 30-second sensor activity windows. |
+| Sensors | PIR motion and digital sound incidents, active/cleared durations, quiet rearming and prolonged-input fault reporting. The sound module does not record audio. |
+| Face recognition | Local YuNet detection + SFace matching on the laptop; live boxes/names, unknown-face review, ESP32-only enrollment bursts and uploaded photos. Adding a person stores samples without retraining the models. |
+| Lighting | Automatic 50% white LED in low light while using the camera, plus a Night mode image profile. CSI pauses camera and automatic lighting work. |
+| Wi-Fi sensing | Experimental single router–ESP32 link. ESP32 sends CSI measurements; the laptop calibrates, analyzes and plots signal changes. |
+| Security watch | Explicit Arm away/Disarm, sustained-change incidents, acknowledgement and saved incident history. It uses anonymous CSI changes, not named person tracking. |
+| Local storage | Settings, activity, face profiles/photos and incidents persist on the laptop. No cloud account or remote access is required. |
+
+### Architecture and protocols
+
+```mermaid
+flowchart LR
+    Sensors["PIR on IO13 / sound D0 on IO14"] --> ESP["ESP32-CAM"]
+    ESP <-->|"2.4 GHz Wi-Fi"| AP["Home router / access point"]
+    AP <-->|"Same LAN"| Laptop["Laptop gateway"]
+    ESP <-->|"MQTT 3.1.1 + mutual TLS :8883"| Broker["Mosquitto on laptop"]
+    Broker <--> Laptop
+    ESP -->|"HTTP JPEG :80 / MJPEG :81"| Laptop
+    ESP -->|"CSI binary I/Q over UDP :5005"| Laptop
+    Laptop --> Models["YuNet + SFace / CSI analysis"]
+    Laptop --> DB["Local SQLite and files"]
+    Phone["Phone or laptop browser"] <-->|"HTTP :8000 / SSE / MJPEG"| Laptop
+```
+
+The labeled data paths also travel over the LAN; USB is for initial upload,
+serial debugging or power. The ESP32 can run from a power bank afterward.
+MQTT carries JSON events/status/commands, with application acknowledgements and
+event deduplication. Video stays on HTTP; CSI uses a separate UDP receiver.
+**Camera acquisition and CSI run separately** to stay within ESP32 memory limits.
+The phone connects to the **laptop's IP**, while dashboard camera settings use
+the **ESP32's IP**. [Protocol details](#current-communication-and-wi-fi-sensing-path).
+
+### Review with the existing project hardware
+
+1. Keep the current laptop gateway and broker running, and power the ESP32 with
+   the **IO0–GND upload jumper removed**. USB serial wires are unnecessary when
+   running from the power bank; the board still needs regulated 5V and GND.
+2. Join the same LAN on your phone/laptop. Use **Open on your phone** on the
+   running dashboard to obtain `http://LAPTOP_WIFI_IP:8000`. `localhost:8000`
+   works only on the laptop that runs the server.
+3. Check **Settings** for the ESP32's current address. Close direct camera
+   stream tabs, then use **Home → Start live**. Enable **Monitor faces** in
+   **People** for face overlays and saved observations.
+4. Review **Activity** for motion/sound, duration and clear/fault state. A stuck
+   PIR is reported as trouble; it should not keep automatic video running.
+5. Under **People**, name an unknown capture or use **ESP32 camera burst**.
+   Keep the person in front of the ESP32 while it captures; this does not use
+   the phone camera. **Upload photos** is a separate enrollment path. Use
+   another photo or live view afterward to check the saved identity.
+6. To try CSI, press **Stop**, turn off **Show video on activity**, then select
+   **Wi-Fi → Start pilot**. Leave the router and ESP32 fixed. Leave the room
+   empty and select **Calibrate empty room** for 60 seconds; valid data must
+   arrive at at least 5 Hz. Arm away only after calibration, allow the
+   15-second exit delay, and review/acknowledge any incident. Disarm and stop
+   the pilot before returning to live video.
+
+Changing placement, reconnecting Wi-Fi, restarting the board/server or ending
+the ten-minute CSI lease requires a new session/calibration as applicable.
+Do not provision a replacement MQTT CA just to review the existing setup: the
+board and gateway already use matching local identities.
+
+### Current validation and open work
+
+The latest software checks passed **89 automated tests**, with separate browser
+checks. Physical checks exercised video/MQTT, CSI packet acquisition, power-loss
+event replay, broker recovery and laptop-service restart. See
+[measured results](#reliability-update-reliable-1) for durations and boundaries.
+
+- **PIR:** prolonged HIGH was isolated to the connected sensor path; its exact
+  electrical cause remains unresolved. This video later shows **Clear**, which
+  does not establish a permanent hardware fix.
+- **Wi-Fi recovery:** a physical router-outage test remains pending because the
+  shared router could not be interrupted.
+- **CSI:** controlled fixed-device walking and non-human disturbance trials
+  remain pending. Recordings made while moving the ESP32 are excluded from
+  human-motion comparisons. The video is a workflow demo, not an accuracy score.
+- **Scope:** one radio link, no person identity/room tracking from CSI, no remote
+  notifications and no continuous video recording. The laptop must stay awake.
+  Dashboard/camera HTTP endpoints have no login; use the trusted local LAN.
+
+## First setup after cloning
+
+For running your own laptop copy, use Python 3 and a virtual environment. The
+current development environment is Linux; the commands below use a Linux shell.
+Docker is needed for the MQTT broker, and Arduino IDE/CLI for firmware uploads.
+
+```bash
+git clone https://github.com/yash-kalathiya/esp32-doorbell.git
+cd esp32-doorbell
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python scripts/download-face-models.py
+./scripts/run-dashboard.sh
+```
+
+Open `http://localhost:8000`, then set the camera address in **Settings**.
+The model downloader installs verified OpenCV model weights. A fresh checkout
+has no enrolled people or event history; those are local data, not demo fixtures.
+Without provisioned MQTT credentials, the gateway can use the camera's HTTP
+status/event/control fallback. For the full MQTT setup, follow
+[Local MQTT setup](#local-mqtt-setup) with the actual camera `device_id` from
+`http://ESP_IP/api/status`; provision matching identities and upload the rebuilt
+firmware. A new laptop's CA will not automatically match an already-flashed board.
+Restart the foreground dashboard after provisioning. If a new board is not yet
+reachable, first upload Wi-Fi-only firmware, read its device ID, then provision
+MQTT and upload again.
+
+For a new firmware checkout:
+
+```bash
+cp firmware/Doorbell/wifi_credentials.example.h firmware/Doorbell/wifi_credentials.h
+```
+
+Edit the local header with your 2.4 GHz Wi-Fi details; it supports a primary and
+an optional second network. Open `firmware/Doorbell/Doorbell.ino` in Arduino IDE,
+keep **all files in that sketch folder**, select **AI Thinker ESP32-CAM** and
+upload. The verified toolchain uses Arduino ESP32 core **3.3.12** and the
+**Huge APP** partition. Serial Monitor uses **115200 baud**.
+[Firmware upload](#firmware-upload) · [Sensor wiring](#sensor-wiring).
+
+USB-to-TTL adapter **TX → U0R**, **RX → U0T**, **GND → GND**, **5V supply → 5V**;
+serial signals must use 3.3V logic. On the project's verified cable only,
+green is TX, white is RX, black is GND and red is 5V; colors are not universal.
+Connect IO0 to GND for uploading, then disconnect power, remove that jumper and
+restart normally. Leave the microSD slot empty because IO13/IO14 serve sensors.
+
+| Laptop network access | Used by |
+| --- | --- |
+| TCP 8000 | Phone/laptop dashboard |
+| TCP 8883 | ESP32 to local MQTT broker |
+| UDP 5005 | ESP32 CSI packets to laptop |
+| Outbound TCP 80/81 to ESP32 | Camera API, snapshots and video |
+
+If a phone cannot connect, check the laptop's current LAN IP, its firewall and
+router client isolation. The ESP32 uses 2.4 GHz; phone/laptop may use 5 GHz if
+both bands share the same LAN. Guest/campus networks can block peer traffic.
+No public domain or internet-facing deployment is needed.
+
+### Where the code and data live
+
+| Location | Purpose |
+| --- | --- |
+| [`firmware/Doorbell/`](firmware/Doorbell/) | Complete Arduino sketch, sensors, camera API, MQTT and bounded CSI sender |
+| [`server/app.py`](server/app.py) | FastAPI gateway, video relay, APIs, saved activity and browser updates |
+| [`server/faces.py`](server/faces.py) | Face detection, embeddings, enrollment and matching |
+| [`server/csi.py`](server/csi.py), [`server/security.py`](server/security.py) | Laptop CSI analysis/calibration and experimental watch rules |
+| [`web/`](web/) | Dashboard HTML, CSS and JavaScript |
+| [`scripts/`](scripts/) | Model download, broker setup, launch and verification tools |
+| [`tests/`](tests/) | Automated software/native checks |
+| `.local-data/` | Private runtime databases, settings, face images, CSI summaries and MQTT identities; excluded from Git |
+
+Wi-Fi/MQTT credential headers, private keys, face databases/photos, downloaded
+model weights, virtual environments, test artifacts and Wiki state are excluded
+from Git. The explicit demo video above is included for teammate review.
+
+Further reference: [Laptop API](#laptop-api-port-8000) ·
+[ESP32 API](#api-v1) · [CSI procedure](#csi-pilot-with-the-existing-esp32-cam) ·
+[Development checks](#dashboard-checks).
+
 ## Dashboard screenshots
 
 Captured from the running dashboard using the current Home-style interface.
@@ -22,19 +207,6 @@ shown below. These results are from one 1.5 m router-to-camera placement and do
 not establish coverage or detection accuracy.
 
 ![CSI pilot showing the saved matched video-off trial comparison](docs/screenshots/csi-pilot.png)
-
-## First setup after cloning
-
-```bash
-git clone https://github.com/yash-kalathiya/esp32-doorbell.git
-cd esp32-doorbell
-cp firmware/Doorbell/wifi_credentials.example.h firmware/Doorbell/wifi_credentials.h
-```
-
-Edit the local `wifi_credentials.h` with your own Wi-Fi details before compiling
-or uploading firmware. That header, face databases/photos, test artifacts,
-downloaded model weights, virtual environments and Wiki state are excluded from
-Git. The model download script installs verified weights separately.
 
 ## Laptop dashboard
 
@@ -136,9 +308,11 @@ security rule. No new ESP32 firmware upload is needed for these laptop rules.
 Final software checks: **89 automated tests passed**, plus the isolated browser
 check for arm/disarm, incident acknowledgement, missing data and mobile layout.
 The initial rule was replayed offline against the saved mixed-motion recordings,
-but those confounded trials do not validate human or intrusion detection. No
-live armed intrusion demonstration has been completed. Leave this feature
-experimental until fixed-device trials and false-positive checks support it.
+but those confounded trials do not validate human or intrusion detection. The
+[demo video](docs/demo/demo_video.mp4) now shows an armed watch, a new incident
+and acknowledgement. This demonstrates the workflow, not a controlled intrusion
+test. Leave this feature experimental until fixed-device trials and
+false-positive checks support it.
 
 Incidents appear locally in the dashboard and can be acknowledged. The latest
 100 are kept in the laptop database, with the latest 20 displayed. They survive
@@ -286,8 +460,10 @@ level duration, HIGH/LOW period counts, completed durations, current active
 event IDs and accepted trigger counts. Raw period counts include the first
 observed level at startup. PIR is sampled about every 20 ms, with the existing
 100-ms stable-state check and 60-second warm-up. Sound edges are latched in
-the GPIO ISR at millisecond resolution, with no networking, allocation or
-logging in that ISR. Sub-millisecond periods display as **<1 ms**.
+the GPIO ISR, with no networking, allocation or logging there. The interrupt
+is masked for 200 ms and the pin is sampled every 20 ms during that holdoff;
+short raw periods can therefore be missed. Sub-millisecond recorded periods
+display as **<1 ms**; this is not a promise to capture every such pulse.
 
 New events retain `type: motion|sound` and add `phase: triggered|cleared`.
 The gateway pairs them by camera, device, boot and sensor using device uptime,
@@ -305,8 +481,9 @@ consume outbox slots, so the visible loss counter still matters during long
 offline periods. Broker configuration is unchanged. Validation includes 50
 Python/native checks, C++ level/lifecycle/outbox tests, an isolated real-model
 browser test, and a real local TLS broker test with a simulated device. The
-timing firmware compiles for AI Thinker ESP32-CAM; physical timing and memory
-margin still require its upload and a hardware check.
+original timing firmware compiled for AI Thinker ESP32-CAM. Later physical
+observations on its `reliable-1` successor are listed under
+[Reliability update](#reliability-update-reliable-1).
 
 Fresh MQTT telemetry and events are the primary path after the MQTT firmware
 is uploaded. Without a connected MQTT device, the server polls the existing
@@ -778,8 +955,9 @@ from socket sending. The callback performs bounded framing/copying only.
 Insufficient PSRAM or internal heap returns a start error. Capture requires at
 least 8,192 free internal bytes and a 2,048-byte largest block at start; it stops
 if sampled free space falls below 4,096 or the largest block below 1,536 bytes.
-These guards reduce pressure. Initial physical video/TLS coexistence testing
-triggered a heap stop; sustained combined operation still needs validation.
+These guards reduce pressure. Older `csi-pilot-1` video/CSI coexistence testing
+triggered a heap stop. Current `reliable-1` excludes simultaneous acquisition;
+measure video and CSI in separate sessions.
 
 Frames use RuView's **ADR-018** 20-byte little-endian header (`0xC5110001`) plus
 32–256 bytes of ESP-IDF imaginary/real pairs, over **UDP 5005** by default. The
@@ -829,7 +1007,9 @@ Its HTTP/MQTT status contains `csi_pilot` counters, stop reason and session seed
 
 One radio link supplies anonymous signal-change evidence. A face sighting does
 not by itself establish entry/exit, and CSI does not identify that person.
-Named tracking and intrusion alerts are future work after physical validation.
+Named tracking is not implemented. The [experimental security watch](#experimental-security-watch)
+uses sustained anonymous signal changes for local possible-intrusion incidents;
+its human/intrusion accuracy remains unvalidated.
 
 Physical pilot on November 12, 2026: the router and ESP32 were reported 1.5 m
 apart in the same room. Real CSI arrived at approximately **14–16.4 Hz**, using
@@ -899,8 +1079,10 @@ the firmware can be uploaded before the sensors are attached.
 
 PIR motion is ignored for the first **60 seconds** after sensor initialization;
 sound input settles for 2 seconds. Motion HIGH must be stable for 100ms.
-Sound interrupts only latch a flag; processing happens in a sensor task, with
-at most one sound event per 3 seconds. Sensors continue running while Wi-Fi
+The direct IRAM sound handler latches an edge and masks its interrupt for at
+least 200 ms; the sensor task processes it and samples the pin every 20 ms.
+Sound incidents require two seconds of quiet to rearm and at least three
+seconds between accepted starts. Sensors continue running while Wi-Fi
 reconnects or the laptop is unavailable.
 
 ## API v1
@@ -925,8 +1107,10 @@ can be serviced while video is streaming. Use one upstream stream connection
 from the laptop server and distribute its frames there. Do not depend
 on the ESP32 serving multiple simultaneous stream viewers.
 
-PIR or sound opens a **30-second activity window**; further activity extends it.
-PIR staying HIGH keeps that window open. Manual viewing remains on until stopped.
+An accepted PIR or sound incident opens a fixed **30-second activity window**;
+further pulses and a PIR staying HIGH do not extend that active window.
+After expiry, a newly accepted incident can open another window. Sound must
+rearm through quiet first. Manual viewing remains on until stopped.
 Stopping manual viewing does not cancel an active motion/sound window. When
 both are inactive, the API stream ends. The camera stays initialized and Wi-Fi
 stays connected; stopping a stream is not deep sleep or physical camera power-off.
@@ -938,8 +1122,9 @@ integration should use the new `:81/api/stream` endpoint.
 
 ## Laptop integration after uploading
 
-No laptop server is required for the current camera page or event polling.
-Until an event URL is configured, the firmware makes no outbound event requests.
+No laptop server is required for the camera's own page or direct event polling.
+This section describes optional HTTP callbacks. They remain disabled until an
+event URL is configured; provisioned MQTT delivery is a separate primary path.
 
 For a manual test from a laptop on the same network:
 
@@ -950,7 +1135,7 @@ curl -X POST http://ESP_IP/api/live/stop
 curl 'http://ESP_IP/api/events?after=0'
 ```
 
-Once the laptop server exists, set its address without another firmware upload:
+To enable HTTP callbacks to the existing laptop server without another firmware upload:
 
 ```bash
 curl -X POST http://ESP_IP/api/config \
@@ -971,8 +1156,10 @@ Each callback POST is a JSON event, for example:
 The laptop must return a **2xx** response to acknowledge an event. Failed
 delivery is retried after 5 seconds with bounded HTTP timeouts. Delivery is
 at least once: deduplicate by `(device_id, boot_id, id)`. The ring retains the
-newest **24 events in RAM**, not video or historical events across reboots.
-An extended outage can overwrite old events; status reports lost callback
+newest **24 events in RAM** for HTTP polling/callbacks. Separately, the current
+MQTT firmware persists up to 24 unconfirmed records in its NVS outbox for
+power-loss replay; neither store contains video. An extended outage can
+overwrite old events; status reports lost callback
 events and polling reports `lost_before_cursor`.
 
 For polling, track `boot_id` and `next_after`; reset the cursor to zero when
@@ -983,8 +1170,9 @@ The same ring is used for push and polling; neither consumes the other view.
 `stream_allowed` before treating a delayed event as current activity.
 
 The ESP32 makes video available but does not independently record or upload
-video when a sensor fires. The laptop server polls events, relays the MJPEG
-stream and runs face recognition; video recording is not implemented.
+video when a sensor fires. The laptop server receives MQTT events, falls back
+to HTTP polling, relays MJPEG and runs face recognition. Video recording is
+not implemented.
 
 ## Verification boundary
 
@@ -999,12 +1187,15 @@ g++ -std=c++17 -Wall -Wextra -Werror tests/doorbell_logic_test.cpp -o /tmp/doorb
 Compile the sketch with the installed ESP32 core:
 
 ```bash
-arduino-cli --config-file /home/yash/.arduinoIDE/arduino-cli.yaml compile \
-  --fqbn esp32:esp32:esp32cam --jobs 2 firmware/Doorbell
+arduino-cli compile \
+  --fqbn esp32:esp32:esp32cam:PartitionScheme=huge_app --jobs 2 firmware/Doorbell
 ```
 
-These checks do not validate real GPIO polarity, wiring, Wi-Fi failover, NVS,
-HTTP callbacks, HTTP stream cancellation or camera operation on the board.
-After uploading, confirm `/api/status`, wait for `pir_ready`, trigger each sensor,
-inspect `/api/events`, then test manual start/stop and activity-window expiry.
-Leave the callback unset until the laptop server is implemented and tested.
+These host checks alone do not validate real GPIO polarity, wiring, Wi-Fi
+failover, NVS, HTTP callbacks, stream cancellation or camera operation. Physical
+measurements and remaining gaps are listed under
+[Reliability update](#reliability-update-reliable-1); the demo video is a separate
+workflow recording. After a new upload, confirm `/api/status`, wait for
+`pir_ready`, trigger each sensor, inspect `/api/events`, then check manual
+start/stop and activity-window expiry. Optional HTTP callbacks can remain unset
+when using MQTT and HTTP polling fallback.

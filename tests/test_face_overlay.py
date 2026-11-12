@@ -52,9 +52,11 @@ def test_rejected_faces_keep_boxes_without_weakening_recognition():
     class Detector:
         def setInputSize(self, size): pass
         def detect(self, image):
-            return None, np.array([[10, 20, 20, 24] + [0] * 10 + [.99],
+            faces = np.array([[10, 20, 20, 24] + [0] * 10 + [.99],
                                    [80, 60, 80, 90] + [0] * 10 + [.98],
                                    [80, 1, 60, 50] + [0] * 10 + [.8]], dtype=np.float32)
+            faces[:, :14] *= image.shape[1] / 192
+            return None, faces
     engine = object.__new__(OpenCVEngine); engine.cv = cv2; engine.detector = Detector()
     _, jpeg = cv2.imencode('.jpg', np.zeros((192, 192, 3), dtype=np.uint8))
     result = engine.detect(jpeg.tobytes())

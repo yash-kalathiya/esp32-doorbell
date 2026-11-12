@@ -17,6 +17,9 @@ MATCH_MARGIN = .08
 DETECTION_BOX_THRESHOLD = .70
 RECOGNITION_DETECTION_THRESHOLD = .90
 CLUSTER_THRESHOLD = .65
+BURST_IDENTITY_THRESHOLD = .65
+BURST_DUPLICATE_THRESHOLD = .995
+MAX_SAMPLES_PER_PERSON = 20
 MODEL_HASHES = {
     "face_detection_yunet_2023mar.onnx": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
     "face_recognition_sface_2021dec.onnx": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
@@ -87,11 +90,31 @@ class OpenCVEngine:
         if width > 960:
             image = cv.resize(image, (960, round(height * 960 / width)))
         height, width = image.shape[:2]
+        best = None
+        for turns in range(4):
+            # np.rot90 is lossless: search upright, 90, 180 and 270 degrees.
+            rotated = np.ascontiguousarray(np.rot90(image, turns)) if turns else image
+            result = self._detect_upright(rotated)
+            if best is None or result["candidate_score"] > best["candidate_score"]:
+                best = result
+                best_turns = turns
+            if result["faces"]:
+                best, best_turns = result, turns
+                break
+        for face in best["faces"] + best["rejected_boxes"]:
+            face["box"] = restore_box(face["box"], best_turns, width, height)
+        best.update(image_width=width, image_height=height, rotation_degrees=best_turns * 90)
+        best.pop("candidate_score", None)
+        return best
+
+    def _detect_upright(self, image):
+        cv = self.cv
+        height, width = image.shape[:2]
         candidates = []
         # YuNet needs faces at suitable pixel sizes: a full-frame close-up may
         # disappear at native resolution. Detect at several scales, then align
         # and assess the face on the original image.
-        for edge in sorted(set((min(320, max(width, height)), min(640, max(width, height)), max(width, height)))):
+        for edge in (320, 640, 960):
             scale = edge / max(width, height)
             scan = image if scale == 1 else cv.resize(image, (max(1, round(width * scale)), max(1, round(height * scale))))
             self.detector.setInputSize((scan.shape[1], scan.shape[0]))
@@ -140,7 +163,20 @@ class OpenCVEngine:
                            "quality": float(face[-1]) * min(w, h),
                            "box": [x1, y1, x2 - x1, y2 - y1]})
         return {"faces": result, "rejected": rejected, "rejected_reasons": reasons,
-                "image_width": width, "image_height": height, "rejected_boxes": rejected_boxes}
+                "image_width": width, "image_height": height, "rejected_boxes": rejected_boxes,
+                "candidate_score": max((float(face[-1]) for face in candidates), default=0)}
+
+
+def restore_box(box, turns, width, height):
+    """Map an upright-analysis box back onto the original JPEG's coordinates."""
+    x, y, w, h = box
+    if turns == 1:  # counterclockwise 90: original x = width - rotated y
+        x, y, w, h = width - y - h, x, h, w
+    elif turns == 2:
+        x, y = width - x - w, height - y - h
+    elif turns == 3:
+        x, y, w, h = y, height - x - w, h, w
+    return [int(x), int(y), int(w), int(h)]
 
 
 class FaceStore:
@@ -224,7 +260,7 @@ class FaceStore:
             if person is None:
                 self.db.execute("INSERT INTO people VALUES (?,?,?,?)", (person_id, name, name.casefold(), utcnow()))
             self.db.execute("INSERT INTO samples VALUES (?,?,?,?,?)", (uuid.uuid4().hex, person_id, capture["embedding"], capture["thumbnail"], utcnow()))
-            self.db.execute("DELETE FROM samples WHERE person_id=? AND id NOT IN (SELECT id FROM samples WHERE person_id=? ORDER BY created_at DESC LIMIT 20)", (person_id, person_id))
+            self.db.execute("DELETE FROM samples WHERE person_id=? AND id NOT IN (SELECT id FROM samples WHERE person_id=? ORDER BY created_at DESC LIMIT ?)", (person_id, person_id, MAX_SAMPLES_PER_PERSON))
             self.db.execute("UPDATE sightings SET person_id=?,similarity=NULL WHERE id=?", (person_id, capture_id))
         return dict(self.db.execute("SELECT id,name,created_at FROM people WHERE id=?", (person_id,)).fetchone())
 
@@ -238,22 +274,39 @@ class FaceStore:
         row = self.db.execute("SELECT name FROM people WHERE id=?", (person_id,)).fetchone() if person_id else None
         return {"label": row["name"] if row else "Unknown", "matched": row is not None}
 
-    def enroll_photos(self, name, detections):
+    def enrollment_reference(self, capture_id, camera_url):
+        row = self.db.execute("SELECT * FROM sightings WHERE id=? AND camera_url=?", (capture_id, camera_url)).fetchone()
+        if row is None:
+            raise KeyError("Face capture no longer exists. Refresh and try again.")
+        return {"embedding": np.frombuffer(row["embedding"], dtype=np.float32), "thumbnail": row["thumbnail"], "quality": row["quality"]}
+
+    def person_embeddings(self, name):
+        return [np.frombuffer(row[0], dtype=np.float32) for row in self.db.execute(
+            "SELECT s.embedding FROM samples s JOIN people p ON p.id=s.person_id WHERE p.name_key=?", (name.casefold(),))]
+
+    def enroll_photos(self, name, detections, capture_id=None):
         name = validate_name(name)
         if not detections:
             raise ValueError("No usable face photos were provided.")
         samples = [(normalized(d["embedding"]).tobytes(), d["thumbnail"]) for d in detections]
+        capture = self.db.execute("SELECT * FROM sightings WHERE id=?", (capture_id,)).fetchone() if capture_id else None
+        if capture_id and capture is None:
+            raise KeyError("Face capture no longer exists. Refresh and try again.")
         person = self.db.execute("SELECT * FROM people WHERE name_key=?", (name.casefold(),)).fetchone()
         if person is None and self.db.execute("SELECT COUNT(*) FROM people").fetchone()[0] >= 100:
             raise ValueError("The local gallery supports up to 100 people. Remove an unused profile first.")
         person_id = person["id"] if person else uuid.uuid4().hex
+        if capture and capture["person_id"] and capture["person_id"] != person_id:
+            raise ValueError("This capture is already enrolled under another name.")
         with self.db:
             if person is None:
                 self.db.execute("INSERT INTO people VALUES (?,?,?,?)", (person_id, name, name.casefold(), utcnow()))
             for embedding, thumbnail in samples:
                 self.db.execute("INSERT INTO samples VALUES (?,?,?,?,?)", (uuid.uuid4().hex, person_id, embedding, thumbnail, utcnow()))
-            self.db.execute("DELETE FROM samples WHERE person_id=? AND id NOT IN (SELECT id FROM samples WHERE person_id=? ORDER BY created_at DESC LIMIT 20)", (person_id, person_id))
-        # Uploaded enrollment images are not camera sightings.
+            self.db.execute("DELETE FROM samples WHERE person_id=? AND id NOT IN (SELECT id FROM samples WHERE person_id=? ORDER BY created_at DESC LIMIT ?)", (person_id, person_id, MAX_SAMPLES_PER_PERSON))
+            if capture:
+                self.db.execute("UPDATE sightings SET person_id=?,similarity=NULL WHERE id=?", (person_id, capture_id))
+        # Uploaded enrollment images are not new camera sightings.
         return dict(self.db.execute("SELECT id,name,created_at FROM people WHERE id=?", (person_id,)).fetchone())
 
     def gallery(self, camera_url):

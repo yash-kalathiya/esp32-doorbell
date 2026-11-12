@@ -233,9 +233,14 @@ function makeUnknownCard(face) {
   input.maxLength = 80; input.placeholder = 'Enter a name'; input.autocomplete = 'off'; input.setAttribute('list', 'known-names');
   const error = document.createElement('p'); error.className = 'enroll-error'; error.setAttribute('role', 'alert'); error.hidden = true;
   const button = document.createElement('button'); button.type = 'submit'; button.className = 'button primary'; button.textContent = 'Save person';
-  form.append(label, input, button, error);
+  const burstOption = document.createElement('label'); burstOption.className = 'burst-option';
+  const burstCheck = document.createElement('input'); burstCheck.type = 'checkbox'; burstCheck.checked = true;
+  burstOption.append(burstCheck, document.createTextNode('Add an 8-photo camera burst'));
+  form.append(label, input, burstOption, button, error);
   form.addEventListener('submit', async event => {
-    event.preventDefault(); button.disabled = true; error.hidden = true;
+    event.preventDefault();
+    if (burstCheck.checked) { openBurst(input.value, face.id); return; }
+    button.disabled = true; error.hidden = true;
     try {
       const result = await api(`/api/faces/${encodeURIComponent(face.id)}/enroll`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:input.value})});
       toast(`${result.name} saved. New camera faces will be compared with this profile.`);
@@ -378,6 +383,92 @@ $('face-monitoring').addEventListener('change', async event => {
 });
 async function pollFaces() { if (!updatesConnected) await refreshFaces(); setTimeout(pollFaces, 3000); }
 pollFaces();
+
+let burstFiles = [], burstUrls = [], burstAnchor = '', burstEpoch = 0, burstBusy = false, burstController = null;
+function clearBurst() {
+  burstEpoch += 1; burstController?.abort(); burstController = null;
+  burstUrls.forEach(url => URL.revokeObjectURL(url)); burstUrls = []; burstFiles = [];
+  $('burst-previews').replaceChildren(); burstBusy = false;
+}
+function openBurst(name = '', anchor = '') {
+  clearBurst(); burstAnchor = anchor; $('burst-form').reset(); $('burst-name').value = name;
+  $('burst-start').disabled = false; $('burst-save').disabled = true; $('burst-name').disabled = false;
+  $('burst-error').hidden = true; $('burst-results').hidden = true; $('burst-results').replaceChildren();
+  $('burst-review').hidden = true; text('burst-progress', 'Make sure the person is ready at the ESP32 camera.');
+  $('burst-dialog').showModal();
+}
+$('burst-open').addEventListener('click', () => openBurst());
+$('burst-dialog').addEventListener('close', clearBurst);
+$('burst-start').addEventListener('click', async () => {
+  if (burstBusy) return;
+  clearBurst(); const epoch = burstEpoch; burstBusy = true;
+  $('burst-start').disabled = true; $('burst-save').disabled = true; $('burst-error').hidden = true;
+  $('burst-results').hidden = true; $('burst-review').hidden = true;
+  const prompts = ['Face forward', 'Keep your face clear', 'Turn slightly left', 'Hold that angle', 'Turn slightly right', 'Hold that angle', 'Move a little closer', 'Face forward again'];
+  try {
+    for (let i = 0; i < 8; i++) {
+      if (epoch !== burstEpoch) return;
+      text('burst-progress', `Photo ${i + 1} of 8 · ${prompts[i]}`);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (epoch !== burstEpoch) return;
+      burstController = new AbortController();
+      const timer = setTimeout(() => burstController?.abort(), 10000);
+      let response;
+      try { response = await fetch('/api/enrollment/frame', {cache:'no-store', signal:burstController.signal}); }
+      finally { clearTimeout(timer); }
+      if (!response.ok) { const body = await response.json().catch(() => ({})); throw Error(body.detail || 'The ESP32 could not supply a photo.'); }
+      const blob = await response.blob();
+      if (epoch !== burstEpoch) return;
+      if (blob.size > 4 * 1024 * 1024 || !blob.type.startsWith('image/jpeg')) throw Error('Camera did not return a usable JPEG.');
+      const file = new File([blob], `burst-${i+1}.jpg`, {type:'image/jpeg'}); burstFiles.push(file);
+      const url = URL.createObjectURL(blob); burstUrls.push(url);
+      const label = document.createElement('label'); label.className = 'burst-preview';
+      const image = document.createElement('img'); image.src = url; image.alt = `Burst photo ${i+1}`;
+      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = true;
+      checkbox.setAttribute('aria-label', `Keep burst photo ${i+1}`);
+      checkbox.addEventListener('change', () => { $('burst-save').disabled = !burstFiles.length || !document.querySelector('#burst-previews input:checked'); });
+      label.append(image, checkbox); $('burst-previews').append(label);
+    }
+    if (epoch === burstEpoch) text('burst-progress', '8 photos captured. Review the photos, then save.');
+  } catch (error) {
+    if (epoch === burstEpoch) { text('burst-error', error.name === 'AbortError' ? 'Camera capture timed out. Check its connection and retry.' : error.message); $('burst-error').hidden = false; }
+  } finally {
+    if (epoch === burstEpoch) {
+      burstBusy = false; $('burst-start').disabled = false;
+      $('burst-save').disabled = !burstFiles.length || !document.querySelector('#burst-previews input:checked'); $('burst-review').hidden = !burstFiles.length;
+    }
+  }
+});
+$('burst-form').addEventListener('submit', async event => {
+  event.preventDefault(); if (burstBusy || !burstFiles.length) return;
+  const selected = [...document.querySelectorAll('#burst-previews input')].flatMap((input,index) => input.checked ? [burstFiles[index]] : []);
+  if (!selected.length) return;
+  const form = new FormData(); form.append('name', $('burst-name').value); form.append('burst','true');
+  if (burstAnchor) form.append('capture_id',burstAnchor);
+  selected.forEach(file => form.append('files',file));
+  burstBusy = true; const epoch = burstEpoch;
+  $('burst-name').disabled = true; $('burst-start').disabled = true; $('burst-save').disabled = true;
+  $('burst-error').hidden = true; text('burst-progress','Checking photos and saving usable samples…');
+  try {
+    const response = await fetch('/api/people/upload', {method:'POST',body:form,signal:AbortSignal.timeout(120000)});
+    const data = await response.json();
+    if (epoch !== burstEpoch) { if (response.ok) { toast('Camera burst saved.'); await refreshFaces(); } return; }
+    $('burst-results').replaceChildren(...(data.results || []).map(result => {
+      const row = document.createElement('li'); row.className = result.status === 'added' ? 'upload-added' : result.status === 'skipped' ? 'upload-skipped' : 'upload-rejected';
+      const label = document.createElement('strong'); label.textContent = result.filename;
+      const reason = document.createElement('span'); reason.textContent = result.reason; row.append(label,reason); return row;
+    }));
+    $('burst-results').hidden = !(data.results || []).length;
+    if (!response.ok) throw Error(typeof data.detail === 'string' ? data.detail : 'Burst enrollment failed.');
+    text('burst-progress', `${data.person.name}: ${data.samples_added} new sample${data.samples_added === 1 ? '' : 's'} saved${burstAnchor ? ', including the reviewed face' : ''}. Near-duplicates are skipped.`);
+    toast(`${data.person.name} saved with ${data.samples_added} new sample${data.samples_added === 1 ? '' : 's'}.`);
+    await refreshFaces(); burstFiles = []; $('burst-save').disabled = true;
+  } catch(error) {
+    if (epoch === burstEpoch) { text('burst-error', error.name === 'TimeoutError' ? 'Save timed out. Refresh People before retrying.' : error.message); $('burst-error').hidden = false; $('burst-save').disabled = false; }
+  } finally {
+    if (epoch === burstEpoch) { burstBusy = false; $('burst-name').disabled = false; $('burst-start').disabled = false; }
+  }
+});
 
 let uploadBusy = false, previewUrls = [];
 function clearUploadPreviews() {

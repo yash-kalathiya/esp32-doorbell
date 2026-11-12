@@ -427,6 +427,49 @@ Software and simulated-device checks do not establish those hardware results.
 
 Do not present the simulated-device integration test as physical sensor results.
 
+### Camera burst, orientations and sample count
+
+Select **People → Camera burst**, enter a name and select **Capture 8 photos**.
+The camera source is the ESP32 only. Frames are about one second apart; the laptop
+reuses an existing live frame when available and otherwise requests a snapshot.
+No extra stream or ESP32 firmware change is required. Review the eight previews,
+uncheck unwanted photos, then save. Photos stay in browser memory until saved;
+closing the dialog cancels capture and discards its temporary images.
+
+Naming an unknown face defaults to this burst workflow; its reviewed face is the
+identity reference and is saved together with accepted burst samples. Uncheck
+**Add an 8-photo camera burst** to save just the existing capture. A burst without
+a reference uses the first usable face (or existing samples for that name).
+Keep only the intended person in view: these similarity checks are not proof of
+identity. The server rejects multi-face, small, blurry or weak detections and
+views below 0.65 similarity to the reference. Burst embeddings at or above 0.995
+similarity to an existing/accepted view are skipped as near-duplicates. Thresholds
+are project policy and need testing with actual people and lighting.
+
+**Sample count:** start with **5–10 distinct, clear real photos**; the burst takes
+8. This is a practical starting point, not a published SFace optimum. OpenCV's
+SFace interface extracts an embedding per aligned face; it does not prescribe a
+fixed gallery size or ideal enrollment count. This application's limits remain
+**20 newest samples per person**, **10 photos per request**, and **100 people**.
+More clear viewpoints and lighting variation are useful to test; many copies of
+the same image do not add a new physical view of a face.
+
+Detection now checks input sizes **320, 640 and 960**. If no usable face is found,
+it also tries **90°, 180° and 270°** image rotations, aligns the detected face for
+SFace, then maps boxes back to the original display coordinates. This applies to
+both enrollment and subsequent recognition. Rotated/scaled scans are temporary
+analysis, not dozens of duplicate stored samples, and cannot synthesize a side
+profile. Existing identity and quality gates remain unchanged. The extra scans
+run on the laptop and cost additional CPU time when upright detection fails.
+
+Real-model regression checks on the public OpenCV sample passed all four image
+orientations and three source-image scales, retaining the original identity
+match and valid overlay coordinates. These checks do not establish accuracy on
+unseen people or the physical ESP32 installation.
+
+Sources: [OpenCV face detection/recognition tutorial](https://docs.opencv.org/4.12.0/d0/dd4/tutorial_dnn_face.html),
+[official SFace implementation](https://github.com/opencv/opencv_zoo/blob/main/models/face_recognition_sface/sface.py).
+
 ### Name an unknown face
 
 1. Connect the camera and laptop to the same Wi-Fi, then open **Faces** in the
@@ -435,7 +478,9 @@ Do not present the simulated-device integration test as physical sensor results.
    every three seconds otherwise, including with no browser open. It reuses current live-stream frames;
    when video is idle, it requests `/api/snapshot` from the ESP32 instead.
 3. A usable unrecognised face appears as a photo under **Unknown faces**.
-   Review that photo, type the person's name and select **Save person**.
+   Review that photo, type the person's name and select **Save person**. The
+   default burst option opens capture and review; save the reviewed burst to
+   finish enrollment, or uncheck it to enroll only the existing face.
 4. The laptop saves its SFace embedding as an enrolled sample. Later camera
    images are compared against saved samples; no model training is required.
 5. Enter an existing name on another unknown capture to add a sample to that
@@ -534,6 +579,7 @@ These are the laptop endpoints; the firmware endpoints below run on the camera.
 | POST | `/api/live/stop` | Clear the camera's manual-live request |
 | GET | `/api/stream` | MJPEG shared from one camera stream |
 | GET | `/api/snapshot` | Download a JPEG from the camera |
+| GET | `/api/enrollment/frame` | Fresh ESP32 burst frame, reusing live video when available |
 | GET | `/api/faces` | Model/monitoring state, unknown captures, people, recent matches |
 | POST | `/api/faces/{id}/enroll` | Save `{"name":"Person name"}` for a reviewed capture |
 | GET | `/api/faces/{id}/image` | Captured face thumbnail |
@@ -541,6 +587,11 @@ These are the laptop endpoints; the firmware endpoints below run on the camera.
 | DELETE | `/api/people/{id}` | Remove a profile, samples and associated face captures |
 | POST | `/api/people/upload` | Multipart `name` + repeated `files` fields; enroll usable photo samples |
 | POST | `/api/faces/test` | Multipart `file`; return transient face-match results without saving |
+
+`POST /api/people/upload` also accepts `burst=true` and an optional `capture_id`
+reference for reviewed burst enrollment. Per-frame results distinguish added,
+skipped duplicates and rejected photos. `/api/faces` includes the enrollment
+limits and orientation/scale settings.
 
 `PUT /api/settings` also accepts `"face_monitoring": false` to pause automatic
 face checks and `"night_mode": true` for the low-light camera profile. GET current

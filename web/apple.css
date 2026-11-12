@@ -286,3 +286,18 @@ summary::-webkit-details-marker { display: none; }
 @media(prefers-reduced-transparency:reduce) { .topbar, nav { background: #f8f8f5; backdrop-filter: none; } dialog::backdrop { backdrop-filter: none; } }
 @media(prefers-contrast:more) { :root { --muted: #46473e; } .metric, .camera-card, .activity-card, .unknown-card, .person-card { outline: 1px solid #a3a495; } .face-status, .face-help, .faces-subtitle, .lighting-row p, .event p, .event time, .metric p { color: #515345; } }
 @media(prefers-reduced-motion:reduce) { *, *::before, *::after { animation: none!important; transition: none!important; scroll-behavior: auto!important; } button:not(:disabled):active, .button:not(:disabled):active { transform: none; } }
+
+/* Enrollment stays in a reviewable dialog; full camera frames are temporary. */
+.burst-option { display:flex; align-items:center; gap:7px; line-height:1.5; min-height:44px; }
+.enroll-form .burst-option { font-size:11px; font-weight:400; }
+.enroll-form .burst-option input { width:17px; height:17px; min-height:17px; flex-shrink:0; accent-color:#b26820; }
+#burst-dialog { max-width:650px; max-height:90dvh; overflow:auto; }
+#burst-name { display:block; width:100%; min-height:46px; border:1px solid #ddded5; border-radius:9px; padding:10px 12px; background:#f8f8f4; color:#292a28; font-size:16px; margin-bottom:14px; }
+#burst-progress { font-size:13px; }
+.burst-previews { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:9px; }
+.burst-preview { position:relative; display:block; border-radius:8px; overflow:hidden; background:#e4e4de; cursor:pointer; }
+.burst-preview img { display:block; width:100%; aspect-ratio:4/3; object-fit:contain; }
+.burst-preview input { position:absolute; bottom:7px; right:7px; width:20px; height:20px; accent-color:#b26820; }
+.burst-preview:has(input:not(:checked)) img { opacity:.4; }
+.upload-results .upload-skipped { background:#efefe8; border-color:#dfdfd6; }
+@media(max-width:650px) { .burst-previews { grid-template-columns:repeat(2,minmax(0,1fr)); } .face-actions { gap:12px; } }

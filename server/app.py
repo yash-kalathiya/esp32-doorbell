@@ -20,7 +20,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from server.faces import FaceStore, MATCH_THRESHOLD, OpenCVEngine, prepare_photo, validate_name
+from server.faces import (FaceStore, MATCH_THRESHOLD, MAX_SAMPLES_PER_PERSON, BURST_IDENTITY_THRESHOLD,
+                          BURST_DUPLICATE_THRESHOLD, OpenCVEngine, normalized, prepare_photo, validate_name)
 from server.mqtt_bridge import MQTTBridge
 from server.lighting import AutomaticLight, frame_brightness
 
@@ -151,12 +152,12 @@ class CameraHub:
     def mark_seen(self):
         self.last_seen, self.last_seen_at = now(), time.monotonic()
 
-    async def camera_snapshot(self, base):
+    async def camera_snapshot(self, base, max_age=2):
         # Face monitoring and lighting share one idle snapshot, with no new ESP32
         # frame buffer and no second live stream.
         async with self.snapshot_lock:
             cached = self.snapshot_frame
-            if cached and cached[0] == base and time.monotonic() - cached[1] < 2:
+            if cached and cached[0] == base and time.monotonic() - cached[1] < max_age:
                 return cached[2]
             response = await self.client.get(base + "/api/snapshot", headers={"Connection": "close"})
             response.raise_for_status()
@@ -244,6 +245,8 @@ class CameraHub:
                 "camera_online": self.online, "error": self.face_error,
                 "last_checked": self.face_last_checked, "faces_in_last_check": self.face_count,
                 "low_quality_faces": self.face_rejected,
+                "enrollment": {"recommended_photos": [5, 10], "max_samples": MAX_SAMPLES_PER_PERSON,
+                               "burst_frames": 8, "orientation_degrees": [0, 90, 180, 270], "detection_scales": [320, 640, 960]},
                 "live_detections": ({**overlay["data"], "valid_for_ms": remaining} if overlay else None),
                 **self.faces.gallery(self.settings.camera_url)}
 
@@ -663,7 +666,8 @@ def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None)
             await file.close()
 
     @app.post("/api/people/upload")
-    async def upload_person(request: Request, name: str = Form(...), files: list[UploadFile] = File(...)):
+    async def upload_person(request: Request, name: str = Form(...), files: list[UploadFile] = File(...),
+                            burst: bool = Form(False), capture_id: str = Form("")):
         hub = request.app.state.hub
         try:
             try:
@@ -677,7 +681,20 @@ def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None)
             if hub.face_state != "ready":
                 raise HTTPException(503, "Face models are not ready. Wait for them to load or check the face-service status.")
             results, detections = [], []
+            generation = hub.config_generation
             async with hub.upload_lock:
+                anchor = None
+                if capture_id:
+                    if not burst:
+                        raise HTTPException(400, "A reference capture is only accepted for burst enrollment.")
+                    try:
+                        anchor = hub.faces.enrollment_reference(capture_id, hub.settings.camera_url)
+                    except KeyError as exc:
+                        raise HTTPException(404, exc.args[0]) from exc
+                    detections.append(anchor)
+                reference = [anchor["embedding"]] if anchor else hub.faces.person_embeddings(name) if burst else []
+                seen = hub.faces.person_embeddings(name) + [anchor["embedding"]] if anchor else list(reference)
+                burst_added = 0
                 for file in files:
                     item = {"filename": (file.filename or "Photo")[:120], "status": "rejected"}
                     try:
@@ -689,7 +706,20 @@ def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None)
                         if not detected["faces"]:
                             reasons = detected.get("rejected_reasons", [])
                             raise ValueError(reasons[0] if reasons else "No face detected. Try a front-facing photo with the whole face visible and uncovered.")
-                        detections.append(detected["faces"][0])
+                        face = detected["faces"][0]
+                        vector = normalized(face["embedding"])
+                        if burst:
+                            if reference and max(float(vector @ other) for other in reference) < BURST_IDENTITY_THRESHOLD:
+                                raise ValueError("Face does not match the reference person. Keep only this person in view.")
+                            if any(float(vector @ other) >= BURST_DUPLICATE_THRESHOLD for other in seen):
+                                item.update(status="skipped", reason="Near-duplicate view skipped; change your angle or distance slightly.")
+                                results.append(item)
+                                continue
+                            if not reference:
+                                reference = [vector]
+                            seen.append(vector)
+                            burst_added += 1
+                        detections.append(face)
                         item.update(status="added", reason="Added to the profile.")
                     except ValueError as exc:
                         item["reason"] = str(exc)
@@ -697,15 +727,26 @@ def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None)
                         logging.getLogger(__name__).warning("Uploaded face photo could not be processed", exc_info=True)
                         item["reason"] = "Could not process this photo. Try a different clear image."
                     results.append(item)
+                if capture_id and generation != hub.config_generation:
+                    raise HTTPException(409, "Camera settings changed during the burst. Capture it again.")
                 if not detections:
+                    if burst and reference and all(item["status"] == "skipped" for item in results):
+                        person = hub.faces.db.execute("SELECT id,name,created_at FROM people WHERE name_key=?", (name.casefold(),)).fetchone()
+                        if person is None:
+                            raise HTTPException(409, "Profile changed during enrollment. Review the gallery and retry.")
+                        person = dict(person)
+                        return {"person": person, "samples_added": 0, "burst_frames_added": 0, "results": results}
                     reasons = list(dict.fromkeys(item["reason"] for item in results))
                     logging.getLogger(__name__).warning("Photo enrollment rejected %d photos: %s", len(results), " | ".join(reasons))
                     return JSONResponse({"detail": "No photos were added. " + " ".join(reasons), "results": results}, status_code=422)
                 try:
-                    person = hub.faces.enroll_photos(name, detections)
+                    person = hub.faces.enroll_photos(name, detections, capture_id or None)
+                except KeyError as exc:
+                    raise HTTPException(404, exc.args[0]) from exc
                 except ValueError as exc:
                     raise HTTPException(400, str(exc)) from exc
-            return {"person": person, "samples_added": len(detections), "results": results}
+            hub.changed.set()
+            return {"person": person, "samples_added": len(detections), "burst_frames_added": burst_added, "results": results}
         finally:
             for file in files:
                 await file.close()
@@ -755,6 +796,25 @@ def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None)
     @app.get("/api/stream")
     async def stream(request: Request):
         return StreamingResponse(request.app.state.hub.frames(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+    @app.get("/api/enrollment/frame")
+    async def enrollment_frame(request: Request):
+        hub = request.app.state.hub
+        if not hub.online:
+            raise HTTPException(503, "ESP32 camera is offline. Connect it before capturing a burst.")
+        base, generation = hub.settings.camera_url, hub.config_generation
+        try:
+            if hub.frame is not None and time.monotonic() - hub.last_frame_at < 2:
+                jpeg = hub.frame
+            else:
+                jpeg = await hub.camera_snapshot(base, max_age=.25)
+            if generation != hub.config_generation:
+                raise HTTPException(409, "Camera changed during capture. Start the burst again.")
+            if not jpeg.startswith(b"\xff\xd8") or len(jpeg) > 4 * 1024 * 1024:
+                raise ValueError("Invalid camera JPEG")
+            return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(502, "Could not capture a burst frame. Check the ESP32 connection.") from exc
 
     @app.get("/api/snapshot")
     async def snapshot(request: Request):

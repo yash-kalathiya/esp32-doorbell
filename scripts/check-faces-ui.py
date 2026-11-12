@@ -91,10 +91,10 @@ async def main():
                     await expect(page.locator('.event-duration')).to_contain_text('ongoing')
                     await page.evaluate("""() => { const banner=document.createElement('p'); banner.textContent='ISOLATED QA · OpenCV sample image · no real ESP32 or household profile'; banner.style='background:#f7ecd4;padding:14px;text-align:center;margin:0'; document.body.prepend(banner); }""")
                     assert await page.locator('.unknown-card img').evaluate('img => img.complete && img.naturalWidth > 0')
-                    await page.locator('.enroll-form input').fill('QA Sample')
+                    await page.locator('.enroll-form input[name=name]').fill('QA Sample')
                     # A background refresh must not erase an in-progress name or lose focus.
                     await page.wait_for_timeout(3500)
-                    await expect(page.locator('.enroll-form input')).to_have_value('QA Sample')
+                    await expect(page.locator('.enroll-form input[name=name]')).to_have_value('QA Sample')
                     await expect(page.locator('#night-mode')).to_have_attribute('aria-pressed', 'false')
                     await page.locator('#night-mode').click()
                     await expect(page.locator('#night-mode')).to_have_attribute('aria-pressed', 'true')
@@ -107,7 +107,17 @@ async def main():
                     await page.evaluate('window.scrollTo(0,0)')
                     await page.locator('#toast').wait_for(state='hidden')
                     await page.screenshot(path=str(ROOT / 'artifacts/face-enrollment-desktop.png'), full_page=True)
-                    await page.get_by_role('button', name='Save person', exact=True).click()
+                    await page.locator('.enroll-form').get_by_role('button', name='Save person', exact=True).click()
+                    await expect(page.locator('#burst-dialog')).to_be_visible()
+                    await expect(page.locator('#burst-name')).to_have_value('QA Sample')
+                    await page.locator('#burst-start').click()
+                    await expect(page.locator('#burst-previews img')).to_have_count(8, timeout=25000)
+                    await expect(page.locator('#burst-save')).to_be_enabled(timeout=10000)
+                    await page.locator('#burst-save').click()
+                    await expect(page.locator('#burst-progress')).to_contain_text('new sample', timeout=30000)
+                    # At least seven identical sample frames are filtered; JPEG recompression may add one view.
+                    assert await page.locator('#burst-results .upload-skipped').count() >= 7
+                    await page.get_by_role('button', name='Close camera burst', exact=True).click()
                     await expect(page.locator('.person-card h4')).to_have_text('QA Sample')
                     await expect(page.locator('.unknown-card')).to_have_count(0)
                     await expect(page.locator('#face-overlay .matched-face text')).to_have_text('QA Sample', timeout=15000)
@@ -208,7 +218,7 @@ async def main():
                         "read_only_recognition_test": True, "fake_device_camera_matching_and_stop": True,
                         "insecure_origin_help": True, "precise_upload_errors": True,
                         "live_unknown_and_name_overlays": True, "desktop_mobile_overlay_alignment": True,
-                        "sensor_durations_and_retrigger_count": True, "overlay_clears_when_paused": True, "night_mode_toggle_confirmed": True, "bright_image_keeps_light_off": True,
+                        "sensor_durations_and_retrigger_count": True, "overlay_clears_when_paused": True, "night_mode_toggle_confirmed": True, "esp32_burst_review_and_duplicate_filter": True, "bright_image_keeps_light_off": True,
                         "javascript_errors": errors}))
                 finally:
                     await browser.close()

@@ -154,6 +154,7 @@ async def main():
                     await page.get_by_role('button', name='Remove QA Sample', exact=True).click()
                     await expect(page.locator('.person-card')).to_have_count(0)
                     # Test a face without saving an unknown capture or profile.
+                    await page.locator('#recognition-tools > summary').click()
                     await page.locator('#test-file').set_input_files(str(fixture))
                     await page.get_by_role('button', name='Run test', exact=True).click()
                     await expect(page.locator('.test-result h4')).to_have_text('Unknown')
@@ -176,7 +177,9 @@ async def main():
                     await expect(page.locator('#test-message')).to_contain_text('Live check', timeout=15000)
                     await expect(page.locator('.test-result h4')).to_have_text('Uploaded QA')
                     await page.evaluate('window.qaTracks = document.getElementById("device-camera-video").srcObject.getTracks()')
-                    await page.get_by_role('button', name='Stop camera', exact=True).click()
+                    await page.locator('#recognition-tools > summary').click()
+                    await page.wait_for_function('window.qaTracks.every(track => track.readyState === "ended")')
+                    await page.locator('#recognition-tools > summary').click()
                     await expect(page.locator('#device-camera-video')).to_be_hidden()
                     assert await page.evaluate('window.qaTracks.every(track => track.readyState === "ended")')
                     await page.screenshot(path=str(ROOT / 'artifacts/face-upload-test-mobile.png'), full_page=True)
@@ -191,6 +194,7 @@ async def main():
                     # An insecure LAN-style HTTP origin must show the HTTPS requirement.
                     insecure = await browser.new_page(viewport={"width":390,"height":844})
                     await insecure.goto(f'http://insecure-camera.test:{port}/#faces')
+                    await insecure.locator('#recognition-tools > summary').click()
                     await expect(insecure.locator('#device-camera-requirement')).to_be_visible()
                     await insecure.get_by_role('button', name='Use device camera', exact=True).click()
                     await expect(insecure.locator('#test-message')).to_contain_text('requires HTTPS')

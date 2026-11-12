@@ -87,7 +87,7 @@ function render() {
   }
   text('video-state', receiving ? 'Live' : viewing ? 'Connecting' : online ? 'Standby' : 'Offline');
   $('video-state').classList.toggle('live', receiving);
-  text('placeholder-title', !online ? 'Let’s connect your camera.' : viewing ? 'Opening your live view…' : 'A clear view, whenever you need it.');
+  text('placeholder-title', !online ? 'Camera offline' : viewing ? 'Opening your live view…' : 'Camera on standby');
   text('placeholder-text', !online ? state?.error || 'Check the camera address and Wi-Fi connection.' : viewing ? state?.video.error || 'Waiting for video from your ESP32-CAM.' : 'Select Start live, or let sensor activity bring up the video.');
   $('placeholder-settings').hidden = online && !state?.video.error;
   text('video-footnote', receiving ? 'Live view · Relayed through your laptop' : 'Video stays on your local network');
@@ -113,7 +113,7 @@ function renderEvents(events) {
   if (signature === eventSignature) return;
   eventSignature = signature; text('event-count', events.length);
   if (!events.length) {
-    $('activity-list').innerHTML = '<div class="empty-state"><span class="empty-icon"><svg aria-hidden="true"><use href="#i-clock"/></svg></span><h3>Quiet for now</h3><p>Motion and sound events will appear here when received.</p></div>';
+    $('activity-list').innerHTML = '<div class="empty-state"><span class="empty-icon"><svg aria-hidden="true"><use href="#i-clock"/></svg></span><h3>No recent activity</h3><p>Motion and sound events will appear here when received.</p></div>';
     return;
   }
   $('activity-list').replaceChildren(...events.map(event => {
@@ -197,7 +197,7 @@ $('settings-form').addEventListener('submit', async event => {
   try {
     await api('/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...await api('/api/settings'), camera_url:$('camera-url').value, face_monitoring:$('face-monitoring').checked})});
     setViewing(false); render.paused = false; eventSignature = '';
-    $('activity-list').innerHTML = '<div class="empty-state"><span class="empty-icon"><svg aria-hidden="true"><use href="#i-clock"/></svg></span><h3>Quiet for now</h3><p>Motion and sound events will appear here when received.</p></div>';
+    $('activity-list').innerHTML = '<div class="empty-state"><span class="empty-icon"><svg aria-hidden="true"><use href="#i-clock"/></svg></span><h3>No recent activity</h3><p>Motion and sound events will appear here when received.</p></div>';
     $('settings-dialog').close(); toast('Camera address saved. Checking the connection…');
     state = await api('/api/status'); render();
   } catch(error) { text('settings-error', error.message); }
@@ -460,6 +460,10 @@ function stopDeviceCamera(message = '') {
   $('device-camera-start').disabled = false; $('device-camera-stop').disabled = true; $('device-camera-facing').disabled = false;
   if (message) { text('test-message', message); $('test-message').hidden = false; }
 }
+$('recognition-tools').addEventListener('toggle', event => {
+  // Also invalidate an outstanding permission request before it can open video.
+  if (!event.target.open) stopDeviceCamera(deviceStream ? 'Device camera stopped.' : '');
+});
 function chooseTestPhoto(file) {
   stopDeviceCamera(); selectedTestPhoto = file || null;
   if (testPreviewUrl) URL.revokeObjectURL(testPreviewUrl);

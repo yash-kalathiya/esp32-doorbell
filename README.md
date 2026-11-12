@@ -97,10 +97,11 @@ The sound module supplies digital threshold events, not microphone audio.
 
 ### Automatic camera light and Night mode
 
-The dashboard uses an Apple-inspired layout with system typography, a translucent
-navigation bar, larger touch controls, responsive cards, and accessibility
-fallbacks for reduced motion, transparency and increased contrast. Connection
-protocol details remain available under **Connection details**.
+The dashboard follows the Apple Home app layout: a laptop sidebar, phone bottom
+navigation, compact status tiles and a prominent camera view. People and unknown
+face review stay visible; **Test recognition**, **Sensor details**, and
+**Connection details** expand on demand. Closing the recognition test stops any
+device camera it opened. Touch controls and accessibility fallbacks remain.
 
 The camera light is **automatic**, using **50% PWM only when the image is dark**.
 It remains off at boot. The laptop estimates image brightness every three seconds

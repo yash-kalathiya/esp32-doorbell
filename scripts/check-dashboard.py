@@ -32,6 +32,9 @@ async def main():
         await page.keyboard.press("Escape")
         await page.set_viewport_size({"width": 390, "height": 844})
         assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        nav = await page.locator('nav').bounding_box()
+        assert nav and abs(nav['y'] + nav['height'] - 844) < 2, nav
+        await expect(page.get_by_role('link', name='People', exact=True)).to_be_visible()
         await page.screenshot(path=str(ARTIFACTS / "dashboard-mobile.png"), full_page=True)
         await page.get_by_role("button", name="Camera settings", exact=True).click()
         await page.locator("#camera-url").fill("8.8.8.8")

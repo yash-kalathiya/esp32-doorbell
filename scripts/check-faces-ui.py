@@ -23,6 +23,7 @@ async def main():
         raise RuntimeError("Place the OpenCV samples/data/lena.jpg test fixture in artifacts/face-model-test.jpg first.")
     jpeg = fixture.read_bytes()
     started = time.monotonic()
+    lighting = {"night_mode": False, "camera_light_percent": 0}
     motion = {"active": True, "event": 1, "triggers": 1}
     class SampleStream(httpx.AsyncByteStream):
         async def __aiter__(self):
@@ -30,6 +31,11 @@ async def main():
                 yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n"
                 await asyncio.sleep(.2)
     def camera(request):
+        for group in ("night", "light"):
+            if request.url.path.startswith(f"/api/{group}/"):
+                enabled = request.url.path.endswith("/start")
+                lighting["night_mode" if group == "night" else "camera_light_percent"] = enabled if group == "night" else 50 if enabled else 0
+                return httpx.Response(200, json=lighting)
         if request.url.path == "/api/stream":
             return httpx.Response(200, stream=SampleStream(), headers={"content-type": "multipart/x-mixed-replace; boundary=frame"})
         if request.url.path == "/api/snapshot":
@@ -39,7 +45,7 @@ async def main():
         uptime = 65000 + int((time.monotonic() - started) * 1000)
         return httpx.Response(200, json={"device_id": "isolated-qa-camera", "boot_id": "qa-only", "uptime_ms": uptime,
             "manual_live": False, "stream_allowed": True, "rssi": -50, "pir_enabled": True,
-            "pir_ready": True, "motion_active": False, "sound_enabled": True,
+            **lighting, "pir_ready": True, "motion_active": False, "sound_enabled": True,
             "sound_input_level": 1, "sound_active_low": True, "sensor_timing_version": 1,
             "sensor_levels": {"motion": {"level": int(motion["active"]), "active_level": 1,
                 "level_for_ms": uptime - 65000, "trigger_count": motion["triggers"],
@@ -89,6 +95,17 @@ async def main():
                     # A background refresh must not erase an in-progress name or lose focus.
                     await page.wait_for_timeout(3500)
                     await expect(page.locator('.enroll-form input')).to_have_value('QA Sample')
+                    await expect(page.locator('#night-mode')).to_have_attribute('aria-pressed', 'false')
+                    await page.locator('#night-mode').click()
+                    await expect(page.locator('#night-mode')).to_have_attribute('aria-pressed', 'true')
+                    async with asyncio.timeout(10):
+                        while not lighting['night_mode']:
+                            await asyncio.sleep(.1)
+                    assert lighting['camera_light_percent'] == 0  # The sample image is bright.
+                    await page.locator('#night-mode').click()
+                    await expect(page.locator('#night-mode')).to_have_attribute('aria-pressed', 'false')
+                    await page.evaluate('window.scrollTo(0,0)')
+                    await page.locator('#toast').wait_for(state='hidden')
                     await page.screenshot(path=str(ROOT / 'artifacts/face-enrollment-desktop.png'), full_page=True)
                     await page.get_by_role('button', name='Save person', exact=True).click()
                     await expect(page.locator('.person-card h4')).to_have_text('QA Sample')
@@ -127,6 +144,8 @@ async def main():
                         await client.post(base + '/api/events', json={"device_id":"isolated-qa-camera", "boot_id":"qa-only", "id":3, "type":"motion", "uptime_ms":69900, "phase":"triggered"})
                     await expect(page.locator('#activity-list .event')).to_have_count(2)
                     await expect(page.locator('#motion-timing')).to_contain_text('2 alerts this boot')
+                    await page.evaluate('window.scrollTo(0,0)')
+                    await page.locator('#toast').wait_for(state='hidden')
                     await page.screenshot(path=str(ROOT / 'artifacts/face-enrollment-mobile.png'), full_page=True)
                     await page.locator('#face-monitoring').uncheck()
                     await expect(page.locator('#face-status')).to_contain_text('paused')
@@ -185,7 +204,7 @@ async def main():
                         "read_only_recognition_test": True, "fake_device_camera_matching_and_stop": True,
                         "insecure_origin_help": True, "precise_upload_errors": True,
                         "live_unknown_and_name_overlays": True, "desktop_mobile_overlay_alignment": True,
-                        "sensor_durations_and_retrigger_count": True, "overlay_clears_when_paused": True,
+                        "sensor_durations_and_retrigger_count": True, "overlay_clears_when_paused": True, "night_mode_toggle_confirmed": True, "bright_image_keeps_light_off": True,
                         "javascript_errors": errors}))
                 finally:
                     await browser.close()

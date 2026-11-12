@@ -18,7 +18,7 @@ function renderSensorTiming() {
     text(`${kind}-timing`, !timing?.supported ? `${title}: timing firmware update needed` : !row ? `${title}: unavailable` :
       `${title}: ${row.level ? 'HIGH' : 'LOW'}${row.level === row.active_level ? ' · active' : ' · idle'}${row.level_for_ms == null ? ' · last known' : ' for ' + sensorDuration(row.level_for_ms)} · ${row.trigger_count} alert${row.trigger_count === 1 ? '' : 's'} this boot${(row.active_level ? row.last_high_ms : row.last_low_ms) != null ? ' · last active ' + sensorDuration(row.active_level ? row.last_high_ms : row.last_low_ms) : ''}`);
   }
-  text('timing-help', !timing?.supported ? 'Upload sensor-time-1 to measure levels and completed activity periods.' : timing.stale ? 'Camera status is stale; live duration is paused.' : 'PIR triggers on HIGH. Sound triggers on LOW; short pulses are grouped by its alert cooldown.');
+  text('timing-help', !timing?.supported ? 'Upload night-light-1 to measure levels and completed activity periods.' : timing.stale ? 'Camera status is stale; live duration is paused.' : 'PIR triggers on HIGH. Sound triggers on LOW; short pulses are grouped by its alert cooldown.');
 }
 function toast(message) {
   text('toast', message); $('toast').hidden = false;
@@ -56,7 +56,12 @@ $('stream').addEventListener('error', () => {
   $('stream').hidden = true; $('placeholder').hidden = false;
   paintFaceOverlay();
 });
+let nightBusy = false;
 function render() {
+  const lighting = state?.camera_controls;
+  $('night-mode').setAttribute('aria-pressed', String(Boolean(lighting?.night_mode)));
+  $('night-mode').disabled = nightBusy;
+  text('lighting-status', `Auto light · ${lighting?.brightness == null ? 'Checking light levels' : lighting?.light_percent ? '50% in low light' : 'Off — enough light'} · Night mode ${lighting?.night_mode ? 'on' : 'off'}${lighting?.applied ? '' : ' · Waiting for camera'}`);
   paintFaceOverlay();
   renderSensorTiming();
   const online = Boolean(state?.online), c = state?.camera || {};
@@ -151,6 +156,18 @@ async function control(action) {
   } catch (error) { toast(error.message); }
   finally { busy = false; render(); }
 }
+$('night-mode').addEventListener('click', async () => {
+  if (nightBusy) return;
+  nightBusy = true; render();
+  try {
+    const settings = await api('/api/settings');
+    const enabled = !settings.night_mode;
+    await api('/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...settings, night_mode:enabled})});
+    state = await api('/api/status');
+    toast(`Night mode ${enabled ? 'on' : 'off'}. ${state.camera_controls.applied ? 'Camera settings applied.' : 'Settings saved; applying when the camera is connected.'}`);
+  } catch (error) { toast(error.message); }
+  finally { nightBusy = false; render(); }
+});
 $('start').addEventListener('click', () => control('start'));
 $('stop').addEventListener('click', () => control('stop'));
 $('auto-live').addEventListener('change', (event) => {
@@ -178,7 +195,7 @@ document.querySelectorAll('[data-close]').forEach(button => button.addEventListe
 $('settings-form').addEventListener('submit', async event => {
   event.preventDefault(); const submit = event.submitter; submit.disabled = true;
   try {
-    await api('/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({camera_url:$('camera-url').value, face_monitoring:$('face-monitoring').checked})});
+    await api('/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...await api('/api/settings'), camera_url:$('camera-url').value, face_monitoring:$('face-monitoring').checked})});
     setViewing(false); render.paused = false; eventSignature = '';
     $('activity-list').innerHTML = '<div class="empty-state"><span class="empty-icon"><svg aria-hidden="true"><use href="#i-clock"/></svg></span><h3>Quiet for now</h3><p>Motion and sound events will appear here when received.</p></div>';
     $('settings-dialog').close(); toast('Camera address saved. Checking the connection…');
@@ -339,7 +356,7 @@ function paintFaceOverlay() {
     text.textContent = label; group.append(text); layer.append(group);
   }
   layer.removeAttribute('hidden');
-  caption.textContent = `Face checks ~3s · ${layer.childElementCount ? 'Latest detection' : 'No face found'}`;
+  caption.textContent = `Face checks ~1s · ${layer.childElementCount ? 'Latest detection' : 'No face found'}`;
 }
 async function refreshFaces() {
   const sequence = ++faceRequest;
@@ -561,4 +578,19 @@ if (window.EventSource) {
   updates.addEventListener('faces', event => renderFaceData(JSON.parse(event.data)));
   updates.addEventListener('error', () => { updatesConnected = false; text('dashboard-updates', 'Polling fallback'); });
   window.addEventListener('pagehide', () => updates.close());
+}
+
+// Keep navigation anchored to the section being viewed.
+if ('IntersectionObserver' in window) {
+  const links = [...document.querySelectorAll('nav a')];
+  const observer = new IntersectionObserver(entries => {
+    const entry = entries.filter(item => item.isIntersecting).sort((a,b) => b.intersectionRatio-a.intersectionRatio)[0];
+    if (!entry) return;
+    links.forEach(link => {
+      const active = link.hash === '#' + entry.target.id;
+      link.classList.toggle('nav-active', active);
+      if (active) link.setAttribute('aria-current', 'location'); else link.removeAttribute('aria-current');
+    });
+  }, {rootMargin:'-120px 0px -40% 0px', threshold:[0,.25,.5]});
+  links.forEach(link => observer.observe(document.querySelector(link.hash)));
 }

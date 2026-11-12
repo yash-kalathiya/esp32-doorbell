@@ -95,14 +95,51 @@ video while this page is open. It does not record video. Face monitoring is a
 separate server function with its own toggle (see below).
 The sound module supplies digital threshold events, not microphone audio.
 
+### Automatic camera light and Night mode
+
+The dashboard uses an Apple-inspired layout with system typography, a translucent
+navigation bar, larger touch controls, responsive cards, and accessibility
+fallbacks for reduced motion, transparency and increased contrast. Connection
+protocol details remain available under **Connection details**.
+
+The camera light is **automatic**, using **50% PWM only when the image is dark**.
+It remains off at boot. The laptop estimates image brightness every three seconds
+from the shared live frame or an idle snapshot shared with face monitoring. No
+second camera stream or ESP32 image buffer is added. Three consecutive dark
+samples enable the lamp; three bright samples disable it, with separate thresholds
+and a 30-second minimum hold between changes. Illumination remains gated to
+streaming and snapshots by the firmware.
+
+This is an image-based estimate, not an ambient lux reading. Camera automatic
+exposure, bright backgrounds and the lamp itself affect it. Defaults are mean
+8-bit grayscale ≤55 to turn on and ≥115 to turn off; calibrate these against the
+actual installation. The laptop server must be running for automatic decisions.
+If face monitoring is paused, lighting can still request idle snapshots.
+
+**Night mode** is a separate camera profile: automatic gain/exposure remain on,
+with brightness and exposure target raised to +1. Turning it off restores both
+to 0. It does not force the lamp on. The preference is saved on the laptop and,
+with the new firmware, in the ESP32's NVS. Camera controls are reapplied after
+reconnection/reboot and their confirmation is shown beside the button. Older
+firmware can use the existing `/control` endpoint until the new sketch is uploaded.
+
+Open `firmware/Doorbell/Doorbell.ino` with **all files in that sketch directory**
+and upload once. The build identifies itself as `night-light-1`; it includes the
+prior memory optimizations and sensor timing. Compilation used **1,296,969 bytes
+of flash and 76,416 bytes of static RAM**. All 58 automated tests and the isolated
+real-model browser checks passed. Physical lighting thresholds and persistence
+still require validation after upload.
+
 ### Live face labels and sensor durations
 
 Live video now displays face boxes with an enrolled name, **Unknown**, or a
 quality hint (**Move closer** / **Improve lighting**). Detection and matching
 run on the laptop using the already-received video frames; no face processing
 or extra frame buffer is added to the ESP32. Boxes scale with the displayed
-image, including phone layouts and letterboxing. Checks run about every three
-seconds, so these are recent analysis results rather than per-frame tracking.
+image, including phone layouts and letterboxing. Checks run about once a second
+while viewing, with stored observations limited to about every three seconds.
+These are recent analysis results rather than per-frame tracking. Lower-confidence
+candidates get a **Face candidate** box; they are not named or enrolled.
 Boxes expire within five seconds of their source frame and clear when video
 stalls, the device changes/reboots, or face monitoring is paused. Existing
 recognition and enrollment thresholds remain in force; a quality hint does not
@@ -115,7 +152,7 @@ the current boot. PIR is active **HIGH**; the current sound module is active
 one motion activation until it clears and rises again. Sound alerts still use
 the existing cooldown; short raw pin periods are not separate accepted alerts.
 
-Upload the new `sensor-time-1` firmware for timing support; it includes the
+Upload the new `night-light-1` firmware for timing support; it includes the
 `mqtt-mem-1` PSRAM optimizations. The laptop overlay works without this reflash.
 Status includes `sensor_timing_version: 1` and `sensor_levels` with current
 level duration, HIGH/LOW period counts, completed durations, current active
@@ -239,7 +276,7 @@ The first diagnostic build identified itself as `mqtt-diag-1`; the memory
 optimization build reports `"firmware_version":"mqtt-mem-1"` in the ESP32's
 `/api/status` response and MQTT state. Upload the complete
 `firmware/Doorbell/` sketch, including its new `doorbell_diagnostics.cpp` and
-`.h` tabs. The newer `sensor-time-1` build includes those optimizations and
+`.h` tabs. The newer `night-light-1` build includes those optimizations and
 adds sensor timing. Neither build needs a broker configuration update.
 
 After uploading, remove the IO0–GND jumper with power disconnected, restart the
@@ -362,7 +399,7 @@ MQTT/Wi-Fi disconnects and zero camera errors. A 40-second video read received
 1,013 frames (about 25 FPS), and both motion and sound events arrived via MQTT.
 The recorded minimum internal heap was 2,944 bytes, versus the earlier 48-byte
 minimum. This was a short stability check; restart recovery, longer operation,
-recognition accuracy and physical `sensor-time-1` duration checks remain open.
+recognition accuracy and physical `night-light-1` duration checks remain open.
 Software and simulated-device checks do not establish those hardware results.
 
 1. For a new setup, join the camera and laptop to the same home Wi-Fi/hotspot, update the broker
@@ -393,8 +430,8 @@ Do not present the simulated-device integration test as physical sensor results.
 
 1. Connect the camera and laptop to the same Wi-Fi, then open **Faces** in the
    dashboard. **Monitor faces** is enabled by default.
-2. Face monitoring checks images about every three seconds while the server
-   runs, including with no browser open. It reuses current live-stream frames;
+2. Face monitoring checks about once a second during live viewing and about
+   every three seconds otherwise, including with no browser open. It reuses current live-stream frames;
    when video is idle, it requests `/api/snapshot` from the ESP32 instead.
 3. A usable unrecognised face appears as a photo under **Unknown faces**.
    Review that photo, type the person's name and select **Save person**.
@@ -505,7 +542,13 @@ These are the laptop endpoints; the firmware endpoints below run on the camera.
 | POST | `/api/faces/test` | Multipart `file`; return transient face-match results without saving |
 
 `PUT /api/settings` also accepts `"face_monitoring": false` to pause automatic
-face checks. Preserve `camera_url` when updating this setting.
+face checks and `"night_mode": true` for the low-light camera profile. GET current
+settings and preserve other fields when updating a preference. `/api/status`
+includes `camera_controls` with image brightness, requested lamp percentage,
+Night mode, and whether settings were confirmed by the camera. The camera also
+accepts POST `/api/night/start`, `/api/night/stop`, `/api/light/start` (50%) and
+`/api/light/stop`; these are local HTTP camera controls, while existing MQTT
+events and live commands are unchanged.
 
 ### Dashboard checks
 

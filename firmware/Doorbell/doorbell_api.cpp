@@ -22,6 +22,7 @@ portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
 DoorbellLevel pirLevel, soundLevel;
 struct SoundLatch { bool pending = false, seen = false, ended = false; uint32_t startMs = 0, endMs = 0; } soundLatch;
 bool sensorTaskReady = false;
+bool nightMode = false;
 int streamClients = 0;
 char eventUrl[192] = {};
 uint32_t callbackAfter = 0, callbackLost = 0;
@@ -102,7 +103,7 @@ cJSON *eventJson(const DoorbellLogic::Event &event) {
 }
 
 cJSON *statusJson() {
-  bool manual, active, motion, ready;
+  bool manual, active, motion, ready, night;
   uint32_t remaining, newest, oldest, overwritten, delivered, lost;
   int clients, deliveryStatus;
   bool pushEnabled;
@@ -111,6 +112,7 @@ cJSON *statusJson() {
   uint32_t now = millis();
   portENTER_CRITICAL(&stateMux);
   now = millis();
+  night = nightMode;
   pirTiming = pirLevel.snapshot(); soundTiming = soundLevel.snapshot();
   motionEvent = logic.motionActiveEvent(); soundEvent = logic.soundActiveEvent();
   motionTriggers = logic.motionTriggerCount(); soundTriggers = logic.soundTriggerCount();
@@ -141,6 +143,8 @@ cJSON *statusJson() {
   cJSON_AddBoolToObject(json, "manual_live", manual);
   cJSON_AddNumberToObject(json, "activity_remaining_ms", remaining);
   cJSON_AddNumberToObject(json, "stream_clients", clients);
+  cJSON_AddBoolToObject(json, "night_mode", night);
+  cJSON_AddNumberToObject(json, "camera_light_percent", doorbellCameraLightPercent());
   cJSON_AddNumberToObject(json, "sensor_timing_version", 1);
   cJSON *levels = cJSON_AddObjectToObject(json, "sensor_levels");
   if (levels) {
@@ -186,6 +190,26 @@ esp_err_t apiLiveStop(httpd_req_t *req) {
   portEXIT_CRITICAL(&stateMux);
   return apiStatus(req);
 }
+
+esp_err_t setNightMode(httpd_req_t *req, bool enabled) {
+  bool before;
+  portENTER_CRITICAL(&stateMux); before = nightMode; portEXIT_CRITICAL(&stateMux);
+  if (doorbellCameraNightMode(enabled) != ESP_OK) {
+    doorbellCameraNightMode(before);
+    return jsonError(req, "500 Internal Server Error", "Camera night settings could not be applied");
+  }
+  if (enabled != before && (!preferencesReady || preferences.putBool("night_mode", enabled) != sizeof(bool)
+      || preferences.getBool("night_mode", !enabled) != enabled)) {
+    doorbellCameraNightMode(before);
+    return jsonError(req, "500 Internal Server Error", "Camera night settings could not be saved");
+  }
+  portENTER_CRITICAL(&stateMux); nightMode = enabled; portEXIT_CRITICAL(&stateMux);
+  return apiStatus(req);
+}
+esp_err_t apiLightStart(httpd_req_t *req) { doorbellCameraLight(true); return apiStatus(req); }
+esp_err_t apiLightStop(httpd_req_t *req) { doorbellCameraLight(false); return apiStatus(req); }
+esp_err_t apiNightStart(httpd_req_t *req) { return setNightMode(req, true); }
+esp_err_t apiNightStop(httpd_req_t *req) { return setNightMode(req, false); }
 
 esp_err_t apiEvents(httpd_req_t *req) {
   uint32_t after = 0;
@@ -299,6 +323,8 @@ bool doorbellBegin() {
   snprintf(deviceId, sizeof(deviceId), "esp32cam-%08lx", (unsigned long)ESP.getEfuseMac());
   snprintf(bootId, sizeof(bootId), "%08lx", (unsigned long)esp_random());
   preferencesReady = preferences.begin("doorbell", false);
+  nightMode = preferencesReady && preferences.getBool("night_mode", false);
+  if (doorbellCameraNightMode(nightMode) != ESP_OK) Serial.println("Camera night settings could not be restored");
   String saved = preferencesReady ? preferences.getString("event_url", DOORBELL_DEFAULT_EVENT_URL)
                                   : String(DOORBELL_DEFAULT_EVENT_URL);
   strlcpy(eventUrl, saved.c_str(), sizeof(eventUrl));
@@ -355,6 +381,10 @@ void doorbellRegisterApi(httpd_handle_t server) {
   registerRoute(server, "/api/events", HTTP_GET, apiEvents);
   registerRoute(server, "/api/live/start", HTTP_POST, apiLiveStart);
   registerRoute(server, "/api/live/stop", HTTP_POST, apiLiveStop);
+  registerRoute(server, "/api/light/start", HTTP_POST, apiLightStart);
+  registerRoute(server, "/api/light/stop", HTTP_POST, apiLightStop);
+  registerRoute(server, "/api/night/start", HTTP_POST, apiNightStart);
+  registerRoute(server, "/api/night/stop", HTTP_POST, apiNightStop);
   registerRoute(server, "/api/config", HTTP_GET, apiConfigGet);
   registerRoute(server, "/api/config", HTTP_POST, apiConfigPost);
 }

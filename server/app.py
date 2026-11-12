@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from server.faces import FaceStore, MATCH_THRESHOLD, OpenCVEngine, prepare_photo, validate_name
 from server.mqtt_bridge import MQTTBridge
+from server.lighting import AutomaticLight, frame_brightness
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,6 +34,7 @@ def now():
 class Settings(BaseModel):
     camera_url: str = "http://192.168.12.140"
     face_monitoring: bool = True
+    night_mode: bool = False
 
     @field_validator("camera_url")
     @classmethod
@@ -133,6 +135,13 @@ class CameraHub:
         self.face_count = 0
         self.face_rejected = 0
         self.face_overlay = None
+        self.light = AutomaticLight()
+        self.light_sampled_at = 0
+        self.snapshot_lock = asyncio.Lock()
+        self.snapshot_frame = None
+        self.camera_controls_task = None
+        self.camera_controls_key = None
+        self.camera_controls_error = None
         self.config_generation = 0
         self.changed = asyncio.Event()
         self.mqtt = MQTTBridge(self, self.data_dir / "mqtt/gateway.json")
@@ -141,6 +150,66 @@ class CameraHub:
 
     def mark_seen(self):
         self.last_seen, self.last_seen_at = now(), time.monotonic()
+
+    async def camera_snapshot(self, base):
+        # Face monitoring and lighting share one idle snapshot, with no new ESP32
+        # frame buffer and no second live stream.
+        async with self.snapshot_lock:
+            cached = self.snapshot_frame
+            if cached and cached[0] == base and time.monotonic() - cached[1] < 2:
+                return cached[2]
+            response = await self.client.get(base + "/api/snapshot", headers={"Connection": "close"})
+            response.raise_for_status()
+            self.snapshot_frame = (base, time.monotonic(), response.content)
+            return response.content
+
+    def controls_key(self):
+        return (self.settings.camera_url, (self.status or {}).get("boot_id"), self.settings.night_mode, self.light.enabled)
+
+    async def apply_camera_controls(self, base, night, light):
+        if "night_mode" in (self.status or {}):
+            for group, enabled in (("night", night), ("light", light)):
+                response = await self.client.post(base + f"/api/{group}/" + ("start" if enabled else "stop"), headers={"Connection": "close"})
+                response.raise_for_status()
+                state = response.json()
+                if not isinstance(state, dict) or (group == "night" and state.get("night_mode") != night) or (group == "light" and state.get("camera_light_percent") != (50 if light else 0)):
+                    raise ValueError("Camera did not confirm requested lighting settings")
+            return
+        for name, value in (("led_intensity", 128 if light else 0), ("aec", 1), ("agc", 1),
+                            ("brightness", 1 if night else 0), ("ae_level", 1 if night else 0)):
+            response = await self.client.get(base + "/control", params={"var": name, "val": value},
+                                             headers={"Connection": "close"})
+            response.raise_for_status()
+
+    async def maintain_camera_controls(self):
+        retry_key, retry_at, device = None, 0, None
+        while True:
+            current_device = (self.settings.camera_url, (self.status or {}).get("boot_id"))
+            if current_device != device:
+                self.light = AutomaticLight()
+                self.light_sampled_at, device = 0, current_device
+            if self.online and current_device[1] and time.monotonic() - self.light_sampled_at >= 3:
+                base = self.settings.camera_url
+                try:
+                    jpeg = self.frame if self.frame is not None and time.monotonic() - self.last_frame_at < 2 else await self.camera_snapshot(base)
+                    brightness = await asyncio.to_thread(frame_brightness, jpeg)
+                    if current_device == (self.settings.camera_url, (self.status or {}).get("boot_id")):
+                        self.light.update(brightness, time.monotonic())
+                except (httpx.HTTPError, ValueError, OSError):
+                    # Unknown/stale brightness never forces the lamp on.
+                    self.light.samples = 0
+                self.light_sampled_at = time.monotonic()
+            key = self.controls_key()
+            if self.online and key[1] and key != self.camera_controls_key and (key != retry_key or time.monotonic() >= retry_at):
+                try:
+                    await self.apply_camera_controls(key[0], key[2], key[3])
+                    if self.controls_key() == key:
+                        self.camera_controls_key, self.camera_controls_error = key, None
+                except (httpx.HTTPError, ValueError):
+                    self.camera_controls_error = "Camera lighting settings could not be applied; retrying when available."
+                    retry_key, retry_at = key, time.monotonic() + 10
+                self.changed.set()
+            await asyncio.sleep(1)
 
     def sensor_activity(self):
         camera = self.status or {}
@@ -158,7 +227,7 @@ class CameraHub:
 
     async def discover_camera(self, ip):
         try:
-            settings = Settings(camera_url=f"http://{ip}", face_monitoring=self.settings.face_monitoring)
+            settings = self.settings.model_copy(update={"camera_url": Settings.local_camera(f"http://{ip}")})
             if settings.camera_url != self.settings.camera_url:
                 await self.configure(settings)
         except ValueError:
@@ -195,6 +264,7 @@ class CameraHub:
             logging.getLogger(__name__).exception("Face model initialization failed")
             return
         previous_frame = -1
+        last_observed_at = 0
         while True:
             if self.settings.face_monitoring and self.online:
                 base, generation = self.settings.camera_url, self.config_generation
@@ -208,18 +278,20 @@ class CameraHub:
                         captured_at = self.last_frame_at
                         captured_boot = (self.status or {}).get("boot_id")
                     else:
-                        response = await self.client.get(base + "/api/snapshot")
-                        response.raise_for_status()
-                        jpeg = response.content
+                        jpeg = await self.camera_snapshot(base)
                     result = await self.detect_faces(jpeg)
                     if generation == self.config_generation and self.settings.face_monitoring:
                         boxes = []
+                        save_observations = time.monotonic() - last_observed_at >= 3
                         for face in result["faces"]:
-                            identifier = self.faces.observe(face, base)
+                            if save_observations:
+                                self.faces.observe(face, base)
                             if face.get("box"):
-                                boxes.append({"box": face["box"], **self.faces.overlay_label(identifier), "quality": "usable"})
+                                boxes.append({"box": face["box"], **self.faces.identify(face["embedding"]), "quality": "usable"})
+                        if save_observations and result["faces"]:
+                            last_observed_at = time.monotonic()
                         for face in result.get("rejected_boxes", []):
-                            boxes.append({"box": face["box"], "label": "Move closer" if face["reason"] == "too_small" else "Improve lighting",
+                            boxes.append({"box": face["box"], "label": {"too_small": "Move closer", "blurry": "Improve lighting", "uncertain": "Face candidate"}.get(face["reason"], "Face candidate"),
                                           "matched": False, "quality": face["reason"]})
                         self.face_overlay = ({"captured_at": captured_at, "boot_id": captured_boot,
                             "data": {"frame_id": previous_frame, "image_width": result["image_width"],
@@ -234,7 +306,7 @@ class CameraHub:
                     if generation == self.config_generation:
                         self.face_error = "Face check failed. Retrying when a readable camera image is available."
                     logging.getLogger(__name__).warning("Face check failed", exc_info=True)
-            await asyncio.sleep(3)
+            await asyncio.sleep(1 if self.viewers else 3)
 
     def save_event(self, event, camera_url=None, source="http"):
         e = Event.model_validate(event)
@@ -285,7 +357,12 @@ class CameraHub:
                 "receiving": self.producer is not None and self.frame is not None and time.monotonic() - self.last_frame_at < 5,
                 "error": self.stream_error}, "events_lost": self.events_lost,
                 "mqtt": self.mqtt.status(), "control_transport": "mqtt" if self.mqtt.ready() else "http",
-                "sensor_activity": self.sensor_activity()}
+                "sensor_activity": self.sensor_activity(), "camera_controls": {
+                    "night_mode": self.settings.night_mode, "light_mode": "auto",
+                    "light_percent": 50 if self.light.enabled else 0,
+                    "brightness": self.light.brightness,
+                    "applied": self.online and self.camera_controls_key == self.controls_key(),
+                    "error": self.camera_controls_error}}
 
     async def poll_once(self):
         base = self.settings.camera_url
@@ -443,6 +520,10 @@ class CameraHub:
             self.changed.set()
 
     async def close(self):
+        if self.camera_controls_task:
+            self.camera_controls_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.camera_controls_task
         await self.mqtt.close()
         if self.face_task:
             self.face_task.cancel()
@@ -466,6 +547,7 @@ def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None)
         await hub.mqtt.start()
         hub.poller = asyncio.create_task(hub.poll())
         hub.face_task = asyncio.create_task(hub.recognize_faces())
+        hub.camera_controls_task = asyncio.create_task(hub.maintain_camera_controls())
         yield
         await hub.close()
 

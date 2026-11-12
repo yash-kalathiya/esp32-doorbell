@@ -54,7 +54,7 @@ void doorbellDiagnosticsBegin() {
       Serial.printf("[diag] WiFi disconnected: reason=%d uptime=%lu\n", reason, (unsigned long)now);
     }
   });
-  Serial.printf("[diag] firmware=sensor-time-1 reset=%s\n", resetName(esp_reset_reason()));
+  Serial.printf("[diag] firmware=night-light-1 reset=%s\n", resetName(esp_reset_reason()));
 }
 
 void doorbellDiagnosticsMqttAttempt() {
@@ -138,7 +138,7 @@ void doorbellDiagnosticsStatus(cJSON *json) {
   portENTER_CRITICAL(&diagnosticsMux);
   d = diagnostics;
   portEXIT_CRITICAL(&diagnosticsMux);
-  cJSON_AddStringToObject(json, "firmware_version", "sensor-time-1");
+  cJSON_AddStringToObject(json, "firmware_version", "night-light-1");
   cJSON *root = cJSON_AddObjectToObject(json, "diagnostics");
   if (!root) return;
   cJSON_AddNumberToObject(root, "version", 1);

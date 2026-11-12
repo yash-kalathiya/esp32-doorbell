@@ -78,7 +78,7 @@ int main() {
   doorbellMemoryBegin();
   doorbellDiagnosticsBegin();
   cJSON *initial=cJSON_CreateObject(); doorbellDiagnosticsStatus(initial);
-  assert(!strcmp(at(initial,"firmware_version")->valuestring,"sensor-time-1"));
+  assert(!strcmp(at(initial,"firmware_version")->valuestring,"night-light-1"));
   assert(cJSON_IsNull(at(at(at(initial,"diagnostics"),"mqtt"),"last_error")));
   cJSON_Delete(initial);
   clockMs=100;

@@ -14,6 +14,8 @@ register_heif_opener(thumbnails=False)
 
 MATCH_THRESHOLD = .50
 MATCH_MARGIN = .08
+DETECTION_BOX_THRESHOLD = .70
+RECOGNITION_DETECTION_THRESHOLD = .90
 CLUSTER_THRESHOLD = .65
 MODEL_HASHES = {
     "face_detection_yunet_2023mar.onnx": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
@@ -71,7 +73,7 @@ class OpenCVEngine:
             if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                 raise ValueError("Face models missing or invalid. Run scripts/download-face-models.py, then restart the server.")
             paths[name] = str(path)
-        self.detector = cv2.FaceDetectorYN.create(paths["face_detection_yunet_2023mar.onnx"], "", (320, 320), .9, .3, 100)
+        self.detector = cv2.FaceDetectorYN.create(paths["face_detection_yunet_2023mar.onnx"], "", (320, 320), DETECTION_BOX_THRESHOLD, .3, 100)
         self.recognizer = cv2.FaceRecognizerSF.create(paths["face_recognition_sface_2021dec.onnx"], "")
 
     def detect(self, jpeg):
@@ -99,7 +101,7 @@ class OpenCVEngine:
                 # Coordinates and five landmarks scale; confidence does not.
                 face[:14] /= scale
                 candidates.append(face)
-        indices = cv.dnn.NMSBoxes([face[:4].tolist() for face in candidates], [float(face[-1]) for face in candidates], .9, .3) if candidates else []
+        indices = cv.dnn.NMSBoxes([face[:4].tolist() for face in candidates], [float(face[-1]) for face in candidates], DETECTION_BOX_THRESHOLD, .3) if candidates else []
         result, rejected, reasons, rejected_boxes = [], 0, [], []
         for index in np.asarray(indices).reshape(-1)[:12]:
             face = candidates[int(index)]
@@ -107,6 +109,12 @@ class OpenCVEngine:
             x1, y1 = max(0, int(x)), max(0, int(y))
             x2, y2 = min(width, int(x + w)), min(height, int(y + h))
             crop = image[y1:y2, x1:x2]
+            if float(face[-1]) < RECOGNITION_DETECTION_THRESHOLD:
+                rejected += 1
+                reasons.append("A possible face was found, but confidence is too low for recognition. Face the camera and improve lighting.")
+                if crop.size:
+                    rejected_boxes.append({"box": [x1, y1, x2 - x1, y2 - y1], "reason": "uncertain"})
+                continue
             if crop.size == 0 or min(x2 - x1, y2 - y1) < 48:
                 rejected += 1
                 reasons.append("The face is too small. Crop closer to the face or use a higher-resolution photo.")
@@ -224,6 +232,11 @@ class FaceStore:
         row = self.db.execute("SELECT s.person_id,p.name FROM sightings s LEFT JOIN people p ON p.id=s.person_id WHERE s.id=?", (capture_id,)).fetchone()
         return {"label": row["name"] if row and row["name"] else "Unknown",
                 "matched": bool(row and row["person_id"] and row["name"])}
+
+    def identify(self, embedding):
+        person_id, _ = self.match(embedding)
+        row = self.db.execute("SELECT name FROM people WHERE id=?", (person_id,)).fetchone() if person_id else None
+        return {"label": row["name"] if row else "Unknown", "matched": row is not None}
 
     def enroll_photos(self, name, detections):
         name = validate_name(name)

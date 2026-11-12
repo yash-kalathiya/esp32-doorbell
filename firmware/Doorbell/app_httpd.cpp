@@ -33,7 +33,7 @@
 #if defined(LED_GPIO_NUM)
 #define CONFIG_LED_MAX_INTENSITY 255
 
-int led_duty = 0;
+int led_duty = 0;  // Off until the laptop detects low light; then 50% PWM.
 bool isStreaming = false;
 
 #endif
@@ -887,5 +887,30 @@ void setupLedFlash() {
   ledcAttach(LED_GPIO_NUM, 5000, 8);
 #else
   log_i("LED flash is disabled -> LED_GPIO_NUM undefined");
+#endif
+}
+
+esp_err_t doorbellCameraNightMode(bool enabled) {
+  sensor_t *sensor = esp_camera_sensor_get();
+  if (!sensor) return ESP_FAIL;
+  int result = sensor->set_gain_ctrl(sensor, 1);
+  result |= sensor->set_exposure_ctrl(sensor, 1);
+  result |= sensor->set_brightness(sensor, enabled ? 1 : 0);
+  result |= sensor->set_ae_level(sensor, enabled ? 1 : 0);
+  return result == 0 ? ESP_OK : ESP_FAIL;
+}
+
+void doorbellCameraLight(bool enabled) {
+#if defined(LED_GPIO_NUM)
+  led_duty = enabled ? 128 : 0;
+  if (isStreaming) enable_led(enabled);
+#endif
+}
+
+int doorbellCameraLightPercent() {
+#if defined(LED_GPIO_NUM)
+  return (led_duty * 100 + 127) / 255;
+#else
+  return -1;
 #endif
 }

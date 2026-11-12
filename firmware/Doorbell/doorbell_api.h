@@ -13,3 +13,6 @@ const char *doorbellBootId();
 cJSON *doorbellStatusJson();
 void doorbellSetManual(bool on);
 bool doorbellNextEvent(uint32_t after, DoorbellLogic::Event *out);
+esp_err_t doorbellCameraNightMode(bool enabled);
+void doorbellCameraLight(bool enabled);
+int doorbellCameraLightPercent();

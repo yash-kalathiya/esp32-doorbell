@@ -16,7 +16,8 @@ async def test_overlay_labels_quality_no_image_leak_and_expiry(tmp_path):
     class Engine:
         def detect(self, jpeg):
             return {"faces": [face], "rejected": 1, "image_width": 320, "image_height": 240,
-                    "rejected_boxes": [{"box": [200, 20, 20, 25], "reason": "too_small"}]}
+                    "rejected_boxes": [{"box": [200, 20, 20, 25], "reason": "too_small"},
+                                       {"box": [200, 80, 40, 50], "reason": "uncertain"}]}
     def forbidden(request):
         pytest.fail("Overlay made another camera HTTP request while live frames existed")
     hub = CameraHub(tmp_path, httpx.MockTransport(forbidden), face_engine=Engine())
@@ -32,6 +33,7 @@ async def test_overlay_labels_quality_no_image_leak_and_expiry(tmp_path):
         data = hub.face_status()["live_detections"]
         assert data["image_width"] == 320 and data["faces"][0]["label"] == "Overlay Test"
         assert data["faces"][0]["matched"] and data["faces"][1]["label"] == "Move closer"
+        assert data["faces"][2]["label"] == "Face candidate" and not data["faces"][2]["matched"]
         assert not any("embedding" in face or "thumbnail" in face for face in data["faces"])
         hub.face_overlay["captured_at"] = time.monotonic() - 6
         assert hub.face_status()["live_detections"] is None
@@ -51,10 +53,11 @@ def test_rejected_faces_keep_boxes_without_weakening_recognition():
         def setInputSize(self, size): pass
         def detect(self, image):
             return None, np.array([[10, 20, 20, 24] + [0] * 10 + [.99],
-                                   [80, 60, 80, 90] + [0] * 10 + [.98]], dtype=np.float32)
+                                   [80, 60, 80, 90] + [0] * 10 + [.98],
+                                   [80, 1, 60, 50] + [0] * 10 + [.8]], dtype=np.float32)
     engine = object.__new__(OpenCVEngine); engine.cv = cv2; engine.detector = Detector()
     _, jpeg = cv2.imencode('.jpg', np.zeros((192, 192, 3), dtype=np.uint8))
     result = engine.detect(jpeg.tobytes())
-    assert not result["faces"] and result["rejected"] == 2
+    assert not result["faces"] and result["rejected"] == 3
     assert result["image_width"] == 192 and result["image_height"] == 192
-    assert {box["reason"] for box in result["rejected_boxes"]} == {"too_small", "blurry"}
+    assert {box["reason"] for box in result["rejected_boxes"]} == {"too_small", "blurry", "uncertain"}

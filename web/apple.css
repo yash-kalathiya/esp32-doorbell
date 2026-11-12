@@ -44,7 +44,7 @@ h1 { font-size: 34px; font-weight: 700; line-height: 1.15; letter-spacing: -1px;
 .offline .dot { background: #bba177; }
 
 /* One compact status row. No repeated chart or metric panels. */
-.metrics { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; margin: 0 0 24px; }
+.metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; margin: 0 0 24px; }
 .metric { min-width: 0; display: flex; align-items: center; gap: 12px; padding: 13px 16px; background: #fcfcfa; border: 0; border-radius: 15px; }
 .metric-icon { width: 23px; height: 30px; background: none; border-radius: 0; color: #88897e; }
 .metric-icon svg { width: 21px; height: 21px; }

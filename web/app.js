@@ -95,8 +95,6 @@ function render() {
   text('video-footnote', receiving ? 'Live view · Relayed through your laptop' : 'Video stays on your local network');
   text('activity-footer', online ? mqtt.device_online ? 'MQTT events · live dashboard updates' : 'HTTP fallback · checking every 2 seconds' : 'History saved · Camera offline');
   const fresh = online ? '' : 'Last reported · ';
-  text('wifi-value', typeof c.rssi === 'number' ? `${c.rssi} dBm` : '—');
-  text('wifi-detail', c.rssi != null ? fresh + (c.rssi > -60 ? 'Strong signal' : c.rssi > -75 ? 'Fair signal' : 'Weak signal') : 'Waiting for camera');
   text('motion-value', c.sensor_policy?.pir_stuck_high ? 'Check sensor' : c.pir_enabled === false ? 'Disabled' : c.motion_active != null ? c.motion_active ? 'Active' : 'Clear' : '—');
   text('motion-detail', c.pir_enabled === false ? 'Disabled in firmware' : c.pir_ready != null ? fresh + (c.pir_ready ? 'PIR input · GPIO 13' : 'Sensor warming up') : 'Waiting for camera');
   text('sound-value', c.sound_enabled === false ? 'Disabled' : c.sound_input_level != null ? c.sound_input_level === (c.sound_active_low ? 0 : 1) ? 'Triggered' : 'Quiet' : '—');
@@ -402,11 +400,7 @@ function renderCsi() {
   text('csi-help', info + (!pilot.enabled && (state?.video?.viewers || camera.manual_live) ? ' Stop live video before starting CSI.' : ''));
   text('csi-rate', pilot.enabled ? `${pilot.rate_hz || 0} Hz` : '—');
   text('csi-rssi', pilot.rssi != null ? `${pilot.rssi} dBm` : '—');
-  text('csi-gaps', pilot.enabled ? String(pilot.sequence_gaps || 0) : '—');
   text('csi-threshold', pilot.threshold != null ? pilot.threshold.toFixed(4) : '—');
-  const memory = camera.diagnostics?.memory || {}, diagnostics = camera.diagnostics?.camera || {};
-  text('csi-heap', memory.internal_min_free_bytes != null ? `${memory.internal_min_free_bytes} B` : '—');
-  text('csi-stream-errors', diagnostics.stream_errors != null ? String(diagnostics.stream_errors) : '—');
   const history = pilot.history || [], scores = history.filter(p => p.score != null).map(p => p.score);
   const ceiling = Math.max(.03, (pilot.threshold || 0) * 1.4, ...scores.map(s => s * 1.15));
   let path = '', pen = false;

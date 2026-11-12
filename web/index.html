@@ -18,7 +18,6 @@
   <div id="notice" class="notice" role="status" hidden></div>
 
   <section class="metrics" aria-label="Device status">
-    <article class="metric"><span class="metric-icon"><svg><use href="#i-wifi"/></svg></span><div><p>Wi-Fi signal</p><strong id="wifi-value">—</strong><span id="wifi-detail">Waiting for camera</span></div></article>
     <article class="metric"><span class="metric-icon"><svg><use href="#i-motion"/></svg></span><div><p>Motion sensor</p><strong id="motion-value">—</strong><span id="motion-detail">Waiting for camera</span></div></article>
     <article class="metric"><span class="metric-icon"><svg><use href="#i-sound"/></svg></span><div><p>Sound detector</p><strong id="sound-value">—</strong><span id="sound-detail">Digital threshold · no audio</span></div></article>
     <article class="metric"><span class="metric-icon"><svg><use href="#i-clock"/></svg></span><div><p>Camera uptime</p><strong id="uptime-value">—</strong><span id="uptime-detail">Waiting for camera</span></div></article>
@@ -43,9 +42,8 @@
     <div class="sensing-heading"><div><h2 id="sensing-title">Wi-Fi sensing</h2><p>CSI pilot · one radio link · coverage not measured</p></div><span class="tag" id="csi-state">No data</span></div>
     <div class="csi-controls"><button class="button primary" id="csi-start" disabled>Start pilot</button><button class="button secondary" id="csi-stop" disabled>Stop pilot</button><button class="button secondary" id="csi-calibrate" disabled>Calibrate empty room</button></div>
     <p class="field-help" id="csi-help" role="status">Upload reliable-1 to begin. No simulated readings are shown.</p>
-    <div class="csi-readings"><div><span>Packets / second</span><strong id="csi-rate">—</strong></div><div><span>Signal</span><strong id="csi-rssi">—</strong></div><div><span>Sequence gaps</span><strong id="csi-gaps">—</strong></div><div><span>Baseline threshold</span><strong id="csi-threshold">—</strong></div><div><span>Internal heap minimum</span><strong id="csi-heap">—</strong></div><div><span>Camera stream errors</span><strong id="csi-stream-errors">—</strong></div></div>
+    <div class="csi-readings"><div><span>Packets / second</span><strong id="csi-rate">—</strong></div><div><span>Signal</span><strong id="csi-rssi">—</strong></div><div><span>Baseline threshold</span><strong id="csi-threshold">—</strong></div></div>
     <div class="csi-plot"><svg id="csi-chart" class="csi-chart" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="Recent normalized CSI signal changes"><path id="csi-line"/><path id="csi-threshold-line"/></svg><span id="csi-plot-empty">Waiting for live CSI measurements</span></div>
-    <p class="field-help">Signal changes are not proof of a person or theft. Missing data means sensing is unavailable, not that the room is empty.</p>
     <p id="csi-comparison" class="csi-comparison" hidden></p>
     <div class="security-watch" aria-labelledby="security-title">
       <div class="sensing-heading"><div><h3 id="security-title">Security watch</h3><p>Experimental · armed-away signal alerts</p></div><span class="tag" id="security-state">Disarmed</span></div>

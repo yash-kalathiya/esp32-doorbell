@@ -431,7 +431,7 @@ Do not present the simulated-device integration test as physical sensor results.
 
 ### Camera burst, orientations and sample count
 
-Select **People → Camera burst**, enter a name and select **Capture 8 photos**.
+Select **People → ESP32 camera burst**, enter a name and select **Capture 8 photos**.
 The camera source is the ESP32 only. Frames are about one second apart; the laptop
 reuses an existing live frame when available and otherwise requests a snapshot.
 No extra stream or ESP32 firmware change is required. Review the eight previews,
@@ -440,7 +440,7 @@ closing the dialog cancels capture and discards its temporary images.
 
 Naming an unknown face defaults to this burst workflow; its reviewed face is the
 identity reference and is saved together with accepted burst samples. Uncheck
-**Add an 8-photo camera burst** to save just the existing capture. A burst without
+**Add an 8-photo ESP32 camera burst** to save just the existing capture. A burst without
 a reference uses the first usable face (or existing samples for that name).
 Keep only the intended person in view: these similarity checks are not proof of
 identity. The server rejects multi-face, small, blurry or weak detections and
@@ -451,8 +451,10 @@ are project policy and need testing with actual people and lighting.
 **Sample count:** start with **5–10 distinct, clear real photos**; the burst takes
 8. This is a practical starting point, not a published SFace optimum. OpenCV's
 SFace interface extracts an embedding per aligned face; it does not prescribe a
-fixed gallery size or ideal enrollment count. This application's limits remain
-**20 newest samples per person**, **10 photos per request**, and **100 people**.
+fixed gallery size or ideal enrollment count. There is **no per-person sample-count cap**:
+accepted enrollment samples remain until the profile is removed. The dashboard
+accepts larger selections and sends sequential batches of at most 10 photos and
+40 MB, with an 8 MB per-photo limit. The gallery still supports 100 people.
 More clear viewpoints and lighting variation are useful to test; many copies of
 the same image do not add a new physical view of a face.
 
@@ -500,8 +502,10 @@ Select **Upload photos** in Faces, enter a name, choose photos and select
 form with its name filled in. An existing name adds samples to that profile.
 Enrollment works with the ESP32 offline and with background monitoring paused.
 
-Upload up to 10 JPEG, PNG, WebP, HEIC/HEIF or AVIF images per request, up to 8 MB each and
-40 MB total. Each photo must contain exactly one detected, usable face of the
+Select any number of JPEG, PNG, WebP, HEIC/HEIF or AVIF images, up to 8 MB each.
+The page sends sequential requests of at most 10 photos and 40 MB, shows each
+photo's result and preserves earlier additions if a later batch fails.
+Each photo must contain exactly one detected, usable face of the
 intended person. The server checks the decoded format, fixes EXIF orientation,
 strips metadata, and rejects images over 24 megapixels. Small/blurry faces,
 group photos, corrupt files and unsupported formats receive individual reasons.
@@ -512,7 +516,9 @@ their primary image. Other unsupported formats report their detected format.
 
 Only face crops and embeddings are retained. Original uploads are closed after
 processing and are not retained as enrollment files or logged. Uploaded photos
-are not recorded as camera sightings. Profiles retain their newest 20 samples.
+are not recorded as camera sightings. Profiles retain all accepted samples until
+removed; adding more does not discard older views. Larger galleries use more
+laptop storage and recognition time.
 
 
 ### Laptop API (port 8000)

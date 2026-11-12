@@ -19,7 +19,6 @@ RECOGNITION_DETECTION_THRESHOLD = .90
 CLUSTER_THRESHOLD = .65
 BURST_IDENTITY_THRESHOLD = .65
 BURST_DUPLICATE_THRESHOLD = .995
-MAX_SAMPLES_PER_PERSON = 20
 MODEL_HASHES = {
     "face_detection_yunet_2023mar.onnx": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
     "face_recognition_sface_2021dec.onnx": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
@@ -260,7 +259,6 @@ class FaceStore:
             if person is None:
                 self.db.execute("INSERT INTO people VALUES (?,?,?,?)", (person_id, name, name.casefold(), utcnow()))
             self.db.execute("INSERT INTO samples VALUES (?,?,?,?,?)", (uuid.uuid4().hex, person_id, capture["embedding"], capture["thumbnail"], utcnow()))
-            self.db.execute("DELETE FROM samples WHERE person_id=? AND id NOT IN (SELECT id FROM samples WHERE person_id=? ORDER BY created_at DESC LIMIT ?)", (person_id, person_id, MAX_SAMPLES_PER_PERSON))
             self.db.execute("UPDATE sightings SET person_id=?,similarity=NULL WHERE id=?", (person_id, capture_id))
         return dict(self.db.execute("SELECT id,name,created_at FROM people WHERE id=?", (person_id,)).fetchone())
 
@@ -303,7 +301,6 @@ class FaceStore:
                 self.db.execute("INSERT INTO people VALUES (?,?,?,?)", (person_id, name, name.casefold(), utcnow()))
             for embedding, thumbnail in samples:
                 self.db.execute("INSERT INTO samples VALUES (?,?,?,?,?)", (uuid.uuid4().hex, person_id, embedding, thumbnail, utcnow()))
-            self.db.execute("DELETE FROM samples WHERE person_id=? AND id NOT IN (SELECT id FROM samples WHERE person_id=? ORDER BY created_at DESC LIMIT ?)", (person_id, person_id, MAX_SAMPLES_PER_PERSON))
             if capture:
                 self.db.execute("UPDATE sightings SET person_id=?,similarity=NULL WHERE id=?", (person_id, capture_id))
         # Uploaded enrollment images are not new camera sightings.

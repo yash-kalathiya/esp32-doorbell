@@ -238,14 +238,19 @@ def test_uploaded_phone_photo_orientation_and_metadata():
     assert not processed.getexif()
 
 
-def test_uploaded_gallery_persists_and_retains_twenty_samples(tmp_path):
+def test_uploaded_gallery_retains_all_samples_and_earliest_view_after_restart(tmp_path):
     store = FaceStore(tmp_path)
     person = store.enroll_photos("Uploaded", [detection()] * 10)
+    original_ids = {r[0] for r in store.db.execute("SELECT id FROM samples WHERE person_id=?", (person["id"],))}
     assert store.enroll_photos("uploaded", [detection()] * 15)["id"] == person["id"]
     store.close()
     store = FaceStore(tmp_path)
-    assert store.gallery(CAMERA)["people"][0]["samples"] == 20
+    assert store.gallery(CAMERA)["people"][0]["samples"] == 25
+    assert original_ids <= {r[0] for r in store.db.execute("SELECT id FROM samples WHERE person_id=?", (person["id"],))}
     assert not store.gallery(CAMERA)["recent"]
+    capture = store.observe(detection(1), CAMERA)
+    store.enroll(capture, "Uploaded")
+    assert store.gallery(CAMERA)["people"][0]["samples"] == 26
     store.close()
 
 

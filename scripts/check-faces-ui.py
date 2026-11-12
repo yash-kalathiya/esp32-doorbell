@@ -168,6 +168,41 @@ async def main():
                     # Existing-person shortcut and precise rejection message.
                     await page.get_by_role('button', name='Add photos for Uploaded QA', exact=True).click()
                     await expect(page.locator('#upload-name')).to_have_value('Uploaded QA')
+                    # Larger selections are batched; a failed later request must
+                    # not discard or resubmit an earlier confirmed batch.
+                    assert await page.evaluate('''() => {
+                        const small = [...photoUploadBatches(Array.from({length:25}, () => ({size:100})))];
+                        const large = [...photoUploadBatches(Array.from({length:11}, () => ({size:8*1024*1024})))];
+                        return JSON.stringify(small.map(b=>b.length)) === '[10,10,5]' &&
+                               JSON.stringify(large.map(b=>b.length)) === '[5,5,1]';
+                    }''')
+                    attempts = 0
+                    async def fail_second_batch(route):
+                        nonlocal attempts
+                        attempts += 1
+                        if attempts == 2:
+                            await route.fulfill(status=502, content_type='application/json', body='{"detail":"Isolated QA interruption"}')
+                        else:
+                            await route.continue_()
+                    await page.route('**/api/people/upload', fail_second_batch)
+                    await page.locator('#upload-files').set_input_files([str(fixture)] * 25)
+                    await expect(page.locator('#upload-previews img')).to_have_count(24)
+                    await page.get_by_role('button', name='Add photos to recognition', exact=True).click()
+                    await expect(page.locator('#upload-message')).to_contain_text('10 photos confirmed added; 15 remain unconfirmed.', timeout=120000)
+                    await expect(page.locator('.person-description p')).to_have_text('12 saved samples')
+                    await page.get_by_role('button', name='Add photos to recognition', exact=True).click()
+                    await expect(page.locator('#upload-message')).to_have_text('15 photos added for Uploaded QA.', timeout=120000)
+                    await expect(page.locator('.person-description p')).to_have_text('27 saved samples')
+                    assert attempts == 4
+                    await page.unroute('**/api/people/upload', fail_second_batch)
+                    # An entirely rejected batch must not prevent later batches.
+                    broken = {"name":"broken.jpg", "mimeType":"image/jpeg", "buffer":b"not an image"}
+                    valid = {"name":"valid.jpg", "mimeType":"image/jpeg", "buffer":jpeg}
+                    await page.locator('#upload-files').set_input_files([broken] * 10 + [valid])
+                    await page.get_by_role('button', name='Add photos to recognition', exact=True).click()
+                    await expect(page.locator('#upload-message')).to_contain_text('1 photo added for Uploaded QA.', timeout=120000)
+                    await expect(page.locator('#upload-results li')).to_have_count(11)
+                    await expect(page.locator('.person-description p')).to_have_text('28 saved samples')
                     await page.locator('#upload-files').set_input_files({"name": "broken.jpg", "mimeType": "image/jpeg", "buffer": b"not an image"})
                     await page.get_by_role('button', name='Add photos to recognition', exact=True).click()
                     await expect(page.locator('#upload-message')).to_contain_text('could not be read')
@@ -180,6 +215,9 @@ async def main():
                         "pause_and_delete": True, "real_model_photo_upload": True, "sse_event_updates": True,
                         "presentation_test_panel_removed": True,
                         "precise_upload_errors": True,
+                        "large_selection_batching_and_partial_failure_recovery": True,
+                        "rejected_batch_does_not_block_next_batch": True,
+                        "all_28_enrollment_samples_retained": True,
                         "live_unknown_and_name_overlays": True, "desktop_mobile_overlay_alignment": True,
                         "sensor_durations_and_retrigger_count": True, "overlay_clears_when_paused": True, "night_mode_toggle_confirmed": True, "esp32_burst_review_and_duplicate_filter": True, "bright_image_keeps_light_off": True,
                         "javascript_errors": errors}))

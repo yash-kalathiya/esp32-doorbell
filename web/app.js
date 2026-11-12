@@ -236,7 +236,7 @@ function makeUnknownCard(face) {
   const button = document.createElement('button'); button.type = 'submit'; button.className = 'button primary'; button.textContent = 'Save person';
   const burstOption = document.createElement('label'); burstOption.className = 'burst-option';
   const burstCheck = document.createElement('input'); burstCheck.type = 'checkbox'; burstCheck.checked = true;
-  burstOption.append(burstCheck, document.createTextNode('Add an 8-photo camera burst'));
+  burstOption.append(burstCheck, document.createTextNode('Add an 8-photo ESP32 camera burst'));
   form.append(label, input, burstOption, button, error);
   form.addEventListener('submit', async event => {
     event.preventDefault();
@@ -524,14 +524,25 @@ $('burst-form').addEventListener('submit', async event => {
   }
 });
 
-let uploadBusy = false, previewUrls = [];
+let uploadBusy = false, previewUrls = [], uploadPending = [];
+
+function* photoUploadBatches(files) {
+  let batch = [], bytes = 0;
+  for (const file of files) {
+    if (batch.length && (batch.length === 10 || bytes + file.size > 40 * 1024 * 1024)) {
+      yield batch; batch = []; bytes = 0;
+    }
+    batch.push(file); bytes += file.size;
+  }
+  if (batch.length) yield batch;
+}
 function clearUploadPreviews() {
   previewUrls.forEach(url => URL.revokeObjectURL(url)); previewUrls = [];
   $('upload-previews').replaceChildren();
 }
 function openUpload(name = '') {
   if (uploadBusy) return;
-  $('upload-form').reset(); $('upload-name').value = name;
+  $('upload-form').reset(); uploadPending = []; $('upload-name').value = name;
   $('upload-message').hidden = true; $('upload-results').hidden = true;
   $('upload-results').replaceChildren(); clearUploadPreviews();
   $('upload-submit').disabled = true; $('upload-dialog').showModal();
@@ -541,16 +552,15 @@ $('upload-dialog').addEventListener('close', clearUploadPreviews);
 $('upload-files').addEventListener('change', event => {
   clearUploadPreviews(); $('upload-results').hidden = true; $('upload-message').hidden = true;
   const files = Array.from(event.target.files);
-  const total = files.reduce((bytes, file) => bytes + file.size, 0);
-  let error = '';
-  if (files.length > 10) error = 'Choose up to 10 photos at a time.';
-  else if (files.some(file => file.size > 8 * 1024 * 1024)) error = 'Each photo must be smaller than 8 MB.';
-  else if (total > 40 * 1024 * 1024) error = 'Choose photos totalling no more than 40 MB.';
+  uploadPending = [];
+  const error = files.some(file => file.size > 8 * 1024 * 1024) ? 'Each photo must be smaller than 8 MB.' : '';
   if (error) {
     text('upload-message', error); $('upload-message').classList.remove('success'); $('upload-message').hidden = false;
     $('upload-submit').disabled = true; return;
   }
-  for (const file of files) {
+  uploadPending = files;
+  // Bound preview decoding without limiting how many photos can be uploaded.
+  for (const file of files.slice(0, 24)) {
     const figure = document.createElement('figure');
     const image = document.createElement('img'); image.alt = `Selected photo: ${file.name}`;
     image.addEventListener('error', () => {
@@ -562,37 +572,57 @@ $('upload-files').addEventListener('change', event => {
     const caption = document.createElement('figcaption'); caption.textContent = file.name;
     figure.append(image, caption); $('upload-previews').append(figure);
   }
+  if (files.length > 24) {
+    const note = document.createElement('p'); note.textContent = `${files.length} photos selected. Previewing the first 24.`;
+    $('upload-previews').append(note);
+  }
   $('upload-submit').disabled = !files.length;
 });
 $('upload-form').addEventListener('submit', async event => {
   event.preventDefault(); if (uploadBusy) return;
-  const files = Array.from($('upload-files').files); if (!files.length) return;
-  const form = new FormData(); form.append('name', $('upload-name').value);
-  files.forEach(file => form.append('files', file));
+  const files = [...uploadPending]; if (!files.length) return;
+  const name = $('upload-name').value;
   uploadBusy = true; $('upload-submit').disabled = true; $('upload-open').disabled = true;
   $('upload-name').disabled = true; $('upload-files').disabled = true;
   $('upload-message').classList.remove('success'); $('upload-message').hidden = false;
-  text('upload-message', `Processing ${files.length} photo${files.length === 1 ? '' : 's'}…`);
-  $('upload-results').hidden = true;
+  $('upload-results').replaceChildren(); $('upload-results').hidden = true;
+  let added = 0, processed = 0;
+  const reasons = new Set();
   try {
-    const response = await fetch('/api/people/upload', {method:'POST', body:form, signal:AbortSignal.timeout(120000)});
-    const result = await response.json();
-    $('upload-results').replaceChildren(...(result.results || []).map(item => {
-      const row = document.createElement('li'); row.className = item.status === 'added' ? 'upload-added' : 'upload-rejected';
-      const filename = document.createElement('strong'); filename.textContent = item.filename;
-      const reason = document.createElement('span'); reason.textContent = item.reason;
-      row.append(filename, reason); return row;
-    }));
-    $('upload-results').hidden = !(result.results || []).length;
-    if (!response.ok) throw Error(typeof result.detail === 'string' ? result.detail : 'Upload failed. Check the name and photos, then try again.');
-    text('upload-message', `${result.samples_added} photo${result.samples_added === 1 ? '' : 's'} added for ${result.person.name}.`);
-    $('upload-message').classList.add('success'); $('upload-files').value = ''; clearUploadPreviews();
-    await refreshFaces(); toast(`${result.person.name} updated with ${result.samples_added} photo${result.samples_added === 1 ? '' : 's'}.`);
+    for (const batch of photoUploadBatches(files)) {
+      text('upload-message', `Checking photos ${processed + 1}–${processed + batch.length} of ${files.length} · ${added} added…`);
+      const form = new FormData(); form.append('name', name);
+      batch.forEach(file => form.append('files', file));
+      const response = await fetch('/api/people/upload', {method:'POST', body:form, signal:AbortSignal.timeout(120000)});
+      const result = await response.json();
+      // A per-photo rejection is a completed batch. Other failures leave the
+      // unconfirmed batch pending and preserve earlier confirmed additions.
+      if (!response.ok && !(response.status === 422 && Array.isArray(result.results))) {
+        throw Error(typeof result.detail === 'string' ? result.detail : 'Upload failed. Check the name and photos, then try again.');
+      }
+      for (const item of result.results || []) {
+        const row = document.createElement('li'); row.className = item.status === 'added' ? 'upload-added' : 'upload-rejected';
+        const filename = document.createElement('strong'); filename.textContent = item.filename;
+        const reason = document.createElement('span'); reason.textContent = item.reason;
+        row.append(filename, reason); $('upload-results').append(row);
+        if (item.status !== 'added') reasons.add(item.reason);
+      }
+      added += result.samples_added || 0; processed += batch.length;
+      uploadPending = files.slice(processed);
+      $('upload-results').hidden = !$('upload-results').children.length;
+      await refreshFaces();
+    }
+    const rejected = reasons.size ? ` Some photos were rejected; check the results below.` : '';
+    text('upload-message', added ? `${added} photo${added === 1 ? '' : 's'} added for ${name}.${rejected}` : `No photos were added. ${[...reasons].join(' ')}`);
+    $('upload-message').classList.toggle('success', added > 0);
+    $('upload-files').value = ''; clearUploadPreviews();
+    if (added) toast(`${name} updated with ${added} photo${added === 1 ? '' : 's'}.`);
   } catch(error) {
-    text('upload-message', error.name === 'TimeoutError' ? 'Upload timed out. Refresh the saved profile before retrying.' : error.message);
+    const detail = error.name === 'TimeoutError' ? 'Upload timed out. Check the saved profile before retrying the unconfirmed batch.' : error.message;
+    text('upload-message', `${added} photos confirmed added; ${uploadPending.length} remain unconfirmed. ${detail}`);
   } finally {
     uploadBusy = false; $('upload-open').disabled = false; $('upload-name').disabled = false; $('upload-files').disabled = false;
-    $('upload-submit').disabled = !$('upload-files').files.length;
+    $('upload-submit').disabled = !uploadPending.length;
   }
 });
 

@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from server.faces import (FaceStore, MATCH_THRESHOLD, MAX_SAMPLES_PER_PERSON, BURST_IDENTITY_THRESHOLD,
+from server.faces import (FaceStore, MATCH_THRESHOLD, BURST_IDENTITY_THRESHOLD,
                           BURST_DUPLICATE_THRESHOLD, OpenCVEngine, normalized, prepare_photo, validate_name)
 from server.mqtt_bridge import MQTTBridge
 from server.lighting import AutomaticLight, frame_brightness
@@ -249,7 +249,7 @@ class CameraHub:
                 "camera_online": self.online, "error": self.face_error,
                 "last_checked": self.face_last_checked, "faces_in_last_check": self.face_count,
                 "low_quality_faces": self.face_rejected,
-                "enrollment": {"recommended_photos": [5, 10], "max_samples": MAX_SAMPLES_PER_PERSON,
+                "enrollment": {"recommended_photos": [5, 10], "max_samples": None,
                                "burst_frames": 8, "orientation_degrees": [0, 90, 180, 270], "detection_scales": [320, 640, 960]},
                 "live_detections": ({**overlay["data"], "valid_for_ms": remaining} if overlay else None),
                 **self.faces.gallery(self.settings.camera_url)}

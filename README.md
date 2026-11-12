@@ -41,7 +41,6 @@ The dashboard runs on your laptop and works in a phone browser on the same
 Wi-Fi. It relays live MJPEG video, offers Start/Stop and downloadable snapshots,
 shows camera/sensor status, saves received motion/sound events locally, and
 recognises enrolled faces using local YuNet + SFace models on the laptop.
-The firmware and hardware settings are unchanged.
 
 1. Power the ESP32-CAM normally, with the IO0–GND upload jumper removed.
 2. Connect the ESP32-CAM, laptop, and phone to the same Wi-Fi. Keep the laptop
@@ -95,6 +94,55 @@ sensor's activity window. The activity toggle automatically displays available
 video while this page is open. It does not record video. Face monitoring is a
 separate server function with its own toggle (see below).
 The sound module supplies digital threshold events, not microphone audio.
+
+### Live face labels and sensor durations
+
+Live video now displays face boxes with an enrolled name, **Unknown**, or a
+quality hint (**Move closer** / **Improve lighting**). Detection and matching
+run on the laptop using the already-received video frames; no face processing
+or extra frame buffer is added to the ESP32. Boxes scale with the displayed
+image, including phone layouts and letterboxing. Checks run about every three
+seconds, so these are recent analysis results rather than per-frame tracking.
+Boxes expire within five seconds of their source frame and clear when video
+stalls, the device changes/reboots, or face monitoring is paused. Existing
+recognition and enrollment thresholds remain in force; a quality hint does not
+enroll or identify a low-quality face. Refresh the dashboard after updating it.
+
+The Activity panel shows each pin's **HIGH/LOW state**, how long that level has
+been observed, the last completed active duration, and accepted alert count for
+the current boot. PIR is active **HIGH**; the current sound module is active
+**LOW**, so a sound HIGH period is idle time. A continuously HIGH PIR produces
+one motion activation until it clears and rises again. Sound alerts still use
+the existing cooldown; short raw pin periods are not separate accepted alerts.
+
+Upload the new `sensor-time-1` firmware for timing support; it includes the
+`mqtt-mem-1` PSRAM optimizations. The laptop overlay works without this reflash.
+Status includes `sensor_timing_version: 1` and `sensor_levels` with current
+level duration, HIGH/LOW period counts, completed durations, current active
+event IDs and accepted trigger counts. Raw period counts include the first
+observed level at startup. PIR is sampled about every 20 ms, with the existing
+100-ms stable-state check and 60-second warm-up. Sound edges are latched in
+the GPIO ISR at millisecond resolution, with no networking, allocation or
+logging in that ISR. Sub-millisecond periods display as **<1 ms**.
+
+New events retain `type: motion|sound` and add `phase: triggered|cleared`.
+The gateway pairs them by camera, device, boot and sensor using device uptime,
+including clock rollover, duplicate transport deliveries and out-of-order
+arrival. The UI shows one card per matched activation: **Active for … · ongoing**
+or **Was active for … · cleared**. A new activation creates another card.
+An unmatched clear remains visible with duration unavailable. Older events
+without timing metadata are preserved and explicitly show that duration was
+not recorded. Durations stop advancing when status becomes stale; boot IDs
+prevent pairing events across a restart.
+
+The NVS outbox record layout and 24-record capacity are preserved; the new
+reader accepts the prior trigger-only records. Completed-period records also
+consume outbox slots, so the visible loss counter still matters during long
+offline periods. Broker configuration is unchanged. Validation includes 50
+Python/native checks, C++ level/lifecycle/outbox tests, an isolated real-model
+browser test, and a real local TLS broker test with a simulated device. The
+timing firmware compiles for AI Thinker ESP32-CAM; physical timing and memory
+margin still require its upload and a hardware check.
 
 Fresh MQTT telemetry and events are the primary path after the MQTT firmware
 is uploaded. Without a connected MQTT device, the server polls the existing
@@ -187,11 +235,12 @@ browser HTTPS deployment, WebRTC and Wi-Fi CSI sensing are outside this mileston
 
 ### Connection diagnostics firmware
 
-The first diagnostic build identified itself as `mqtt-diag-1`; the current
-optimized build reports `"firmware_version":"mqtt-mem-1"` in the ESP32's
+The first diagnostic build identified itself as `mqtt-diag-1`; the memory
+optimization build reports `"firmware_version":"mqtt-mem-1"` in the ESP32's
 `/api/status` response and MQTT state. Upload the complete
 `firmware/Doorbell/` sketch, including its new `doorbell_diagnostics.cpp` and
-`.h` tabs. The broker configuration does not need an update for this build.
+`.h` tabs. The newer `sensor-time-1` build includes those optimizations and
+adds sensor timing. Neither build needs a broker configuration update.
 
 After uploading, remove the IO0–GND jumper with power disconnected, restart the
 board, and open `http://ESP32_IP/api/status`. The laptop's `/api/status` also
@@ -308,8 +357,12 @@ and [cJSON allocation hooks, preallocated printing and thread safety](https://gi
 The MQTT firmware has been uploaded to the physical ESP32-CAM. Live checks on
 November 11, 2026 confirmed an authenticated MQTT connection, a received motion
 event, a cleared pending-event queue, and the video relay receiving frames.
-Sound events were received through HTTP before this upload; a fresh sound event
-through MQTT, restart recovery, and recognition accuracy still need validation.
+After the `mqtt-mem-1` upload, a 60-second physical observation recorded zero
+MQTT/Wi-Fi disconnects and zero camera errors. A 40-second video read received
+1,013 frames (about 25 FPS), and both motion and sound events arrived via MQTT.
+The recorded minimum internal heap was 2,944 bytes, versus the earlier 48-byte
+minimum. This was a short stability check; restart recovery, longer operation,
+recognition accuracy and physical `sensor-time-1` duration checks remain open.
 Software and simulated-device checks do not establish those hardware results.
 
 1. For a new setup, join the camera and laptop to the same home Wi-Fi/hotspot, update the broker

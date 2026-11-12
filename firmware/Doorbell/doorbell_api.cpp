@@ -11,12 +11,16 @@
 #include "doorbell_mqtt.h"
 #include "doorbell_diagnostics.h"
 #include "doorbell_memory.h"
+#include "doorbell_levels.h"
+#include <hal/gpio_ll.h>
+#include <soc/gpio_struct.h>
 
 namespace {
 DoorbellLogic logic(DOORBELL_ACTIVITY_MS, DOORBELL_PIR_WARMUP_MS,
                     DOORBELL_SOUND_SETTLE_MS, DOORBELL_SOUND_COOLDOWN_MS);
 portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
-volatile bool soundPulse = false;
+DoorbellLevel pirLevel, soundLevel;
+struct SoundLatch { bool pending = false, seen = false, ended = false; uint32_t startMs = 0, endMs = 0; } soundLatch;
 bool sensorTaskReady = false;
 int streamClients = 0;
 char eventUrl[192] = {};
@@ -28,13 +32,22 @@ bool preferencesReady = false;
 char deviceId[24] = {}, bootId[12] = {};
 
 const char *eventName(DoorbellLogic::EventType type) {
-  return type == DoorbellLogic::EventType::Motion ? "motion" : "sound";
+  return type == DoorbellLogic::EventType::Motion || type == DoorbellLogic::EventType::MotionCleared ? "motion" : "sound";
 }
 
 void ARDUINO_ISR_ATTR soundInterrupt() {
-  // Latch pulses only. No queue, networking, allocation or logging in the ISR.
+  uint32_t now = millis();
+  bool high = gpio_ll_get_level(&GPIO, DOORBELL_SOUND_PIN) != 0;
+  bool active = high != DOORBELL_SOUND_ACTIVE_LOW;
+  // Latch one pulse until consumed; raw level counts still track every edge.
+  // No queue, networking, allocation or logging in the ISR.
   portENTER_CRITICAL_ISR(&stateMux);
-  soundPulse = true;
+  soundLevel.observe(high, now);
+  if (active && !soundLatch.pending) {
+    soundLatch.pending = true; soundLatch.seen = false; soundLatch.ended = false; soundLatch.startMs = now;
+  } else if (!active && soundLatch.pending && !soundLatch.ended) {
+    soundLatch.ended = true; soundLatch.endMs = now;
+  }
   portEXIT_CRITICAL_ISR(&stateMux);
 }
 
@@ -43,8 +56,14 @@ void sensorTask(void *) {
     bool pir = DOORBELL_PIR_ENABLED && digitalRead(DOORBELL_PIR_PIN) == HIGH;
     uint32_t now = millis();
     portENTER_CRITICAL(&stateMux);
-    bool pulse = soundPulse;
-    soundPulse = false;
+    pirLevel.observe(pir, now);
+    DoorbellLogic::SoundPulse pulse;
+    if (soundLatch.pending) {
+      pulse.started = !soundLatch.seen; pulse.startedAt = soundLatch.startMs;
+      pulse.ended = soundLatch.ended; pulse.endedAt = soundLatch.endMs;
+      soundLatch.seen = true;
+      if (soundLatch.ended) soundLatch.pending = false;
+    }
     logic.observe(now, pir, pulse);
     portEXIT_CRITICAL(&stateMux);
     vTaskDelay(pdMS_TO_TICKS(20));
@@ -77,6 +96,7 @@ cJSON *eventJson(const DoorbellLogic::Event &event) {
   cJSON_AddStringToObject(json, "boot_id", bootId);
   cJSON_AddNumberToObject(json, "id", event.id);
   cJSON_AddStringToObject(json, "type", eventName(event.type));
+  cJSON_AddStringToObject(json, "phase", static_cast<uint8_t>(event.type) >= 2 ? "cleared" : "triggered");
   cJSON_AddNumberToObject(json, "uptime_ms", event.uptimeMs);
   return json;
 }
@@ -86,8 +106,14 @@ cJSON *statusJson() {
   uint32_t remaining, newest, oldest, overwritten, delivered, lost;
   int clients, deliveryStatus;
   bool pushEnabled;
+  DoorbellLevel::Snapshot pirTiming, soundTiming;
+  uint32_t motionEvent, soundEvent, motionTriggers, soundTriggers;
   uint32_t now = millis();
   portENTER_CRITICAL(&stateMux);
+  now = millis();
+  pirTiming = pirLevel.snapshot(); soundTiming = soundLevel.snapshot();
+  motionEvent = logic.motionActiveEvent(); soundEvent = logic.soundActiveEvent();
+  motionTriggers = logic.motionTriggerCount(); soundTriggers = logic.soundTriggerCount();
   manual = logic.manualRequested();
   active = logic.liveActive(now);
   motion = logic.stableMotion();
@@ -115,6 +141,12 @@ cJSON *statusJson() {
   cJSON_AddBoolToObject(json, "manual_live", manual);
   cJSON_AddNumberToObject(json, "activity_remaining_ms", remaining);
   cJSON_AddNumberToObject(json, "stream_clients", clients);
+  cJSON_AddNumberToObject(json, "sensor_timing_version", 1);
+  cJSON *levels = cJSON_AddObjectToObject(json, "sensor_levels");
+  if (levels) {
+    cJSON_AddItemToObject(levels, "motion", doorbellLevelJson(pirTiming, now, true, motionEvent, motionTriggers));
+    cJSON_AddItemToObject(levels, "sound", doorbellLevelJson(soundTiming, now, !DOORBELL_SOUND_ACTIVE_LOW, soundEvent, soundTriggers));
+  }
   cJSON_AddBoolToObject(json, "sensor_task_ready", sensorTaskReady);
   cJSON_AddBoolToObject(json, "pir_enabled", DOORBELL_PIR_ENABLED);
   cJSON_AddNumberToObject(json, "pir_pin", DOORBELL_PIR_PIN);
@@ -273,10 +305,12 @@ bool doorbellBegin() {
   if (DOORBELL_PIR_ENABLED) pinMode(DOORBELL_PIR_PIN, INPUT_PULLDOWN);
   if (DOORBELL_SOUND_ENABLED) {
     pinMode(DOORBELL_SOUND_PIN, DOORBELL_SOUND_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
-    attachInterrupt(digitalPinToInterrupt(DOORBELL_SOUND_PIN), soundInterrupt,
-                    DOORBELL_SOUND_ACTIVE_LOW ? FALLING : RISING);
   }
-  logic.begin(millis());
+  uint32_t started = millis();
+  pirLevel.observe(DOORBELL_PIR_ENABLED && digitalRead(DOORBELL_PIR_PIN) == HIGH, started);
+  soundLevel.observe(!DOORBELL_SOUND_ENABLED || digitalRead(DOORBELL_SOUND_PIN) == HIGH, started);
+  logic.begin(started);
+  if (DOORBELL_SOUND_ENABLED) attachInterrupt(digitalPinToInterrupt(DOORBELL_SOUND_PIN), soundInterrupt, CHANGE);
   TaskHandle_t task = nullptr;
   sensorTaskReady = xTaskCreate(sensorTask, "doorbell-sensors", 3072, nullptr, 1, &task) == pdPASS;
   if (!sensorTaskReady) {

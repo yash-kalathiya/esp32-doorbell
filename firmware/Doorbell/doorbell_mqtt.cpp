@@ -186,7 +186,8 @@ void task(void *) {
           cJSON_AddStringToObject(json, "device_id", doorbellDeviceId());
           cJSON_AddStringToObject(json, "boot_id", boot);
           cJSON_AddNumberToObject(json, "id", record.id);
-          cJSON_AddStringToObject(json, "type", record.type == 0 ? "motion" : "sound");
+          cJSON_AddStringToObject(json, "type", record.type % 2 == 0 ? "motion" : "sound");
+          cJSON_AddStringToObject(json, "phase", record.type >= 2 ? "cleared" : "triggered");
           cJSON_AddNumberToObject(json, "uptime_ms", record.uptimeMs);
         }
         publishJson(eventTopic, json); sentAt = now; sentBoot = record.boot; sentId = record.id;

@@ -29,7 +29,7 @@ class DoorbellOutbox {
   Snapshot snapshot() const { Snapshot out = data; out.checksum = hash(out); return out; }
   bool restore(const Snapshot &saved) {
     if (saved.magic != 0x44425131 || saved.count > capacity || saved.checksum != hash(saved)) return false;
-    for (size_t i = 0; i < saved.count; ++i) if (saved.records[i].type > 1 || !saved.records[i].id) return false;
+    for (size_t i = 0; i < saved.count; ++i) if (saved.records[i].type > 3 || !saved.records[i].id) return false;
     data = saved; return true;
   }
  private:

@@ -97,7 +97,7 @@ async def main():
             await until(hub.mqtt.ready)
             assert len(json.dumps(state())) > 1024
             assert hub.mqtt.last_state["test_padding"] == "x" * 1300
-            event = {"device_id":"qa-device", "boot_id":"1234abcd", "id":1, "type":"motion", "uptime_ms":uptime()}
+            event = {"device_id":"qa-device", "boot_id":"1234abcd", "id":1, "type":"motion", "uptime_ms":uptime(), "phase":"triggered"}
             for _ in range(2):
                 device.publish("doorbell/qa-device/events", json.dumps(event), qos=1)
             await until(lambda: len(receipts) == 2)
@@ -106,6 +106,9 @@ async def main():
             hub.save_event(event)
             assert len(hub.events()) == 1 and hub.events()[0]["source"] == "mqtt+http"
             assert hub.events()[0]["received_at"] == first_received
+            device.publish("doorbell/qa-device/events", json.dumps({**event, "id":2, "phase":"cleared", "uptime_ms":event["uptime_ms"]+500}), qos=1)
+            await until(lambda: len(hub.events()) == 2)
+            assert all(row["duration_ms"] == 500 for row in hub.events())
             start = await hub.command("start")
             assert start["camera"]["manual_live"] and start["control_transport"] == "mqtt"
             stop = await hub.command("stop")
@@ -115,9 +118,9 @@ async def main():
             subprocess.run(["docker", "restart", name], check=True, capture_output=True)
             await until(lambda: hub.mqtt.connected and connection_count > before_restart, timeout=25)
             await until(hub.mqtt.ready, timeout=20)
-            published = device.publish("doorbell/qa-device/events", json.dumps({**event, "id":2}), qos=1)
+            published = device.publish("doorbell/qa-device/events", json.dumps({**event, "id":3, "uptime_ms":uptime()}), qos=1)
             assert published.rc == mqtt.MQTT_ERR_SUCCESS
-            await until(lambda: len(hub.events()) == 2)
+            await until(lambda: len(hub.events()) == 3)
             # A client with only the server CA and no client identity is refused.
             def unauthenticated():
                 context = ssl.create_default_context(cafile=str(directory / "ca.crt"))
@@ -145,6 +148,7 @@ async def main():
             print(json.dumps({"source":"real local Mosquitto broker; simulated device; isolated database",
                 "mutual_tls":True, "unauthenticated_client_rejected":True, "qos1_event_receipt":True,
                 "qos0_heartbeat":True, "state_over_1024_bytes_received":True,
+                "trigger_clear_duration_pairing":True,
                 "duplicate_event_deduplication":True, "mqtt_start_stop_acknowledged":True,
                 "broker_restart_recovered":True, "last_will_offline":True, "stored_events":len(hub.events())}))
         except Exception:

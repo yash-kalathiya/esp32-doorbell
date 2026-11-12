@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 let state = null, viewing = false, busy = false, connectingAt = 0;
 let updatesConnected = false;
+let faceOverlay = null, faceOverlayUntil = 0, faceOverlayTimer = null, faceOverlayService = null;
 let autoLive = localStorage.getItem('doorbell-auto-live') !== 'false';
 $('auto-live').checked = autoLive;
 const text = (id, value) => { $(id).textContent = value; };
@@ -9,6 +10,16 @@ const duration = (ms) => {
   if (minutes < 1) return `${Math.floor(ms / 1000)} sec`;
   return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 };
+const sensorDuration = (ms) => ms === 0 ? '<1 ms' : ms < 1000 ? `${Math.round(ms)} ms` : duration(ms);
+function renderSensorTiming() {
+  const timing = state?.sensor_activity;
+  for (const [kind, title] of [['motion', 'PIR'], ['sound', 'Sound']]) {
+    const row = timing?.[kind];
+    text(`${kind}-timing`, !timing?.supported ? `${title}: timing firmware update needed` : !row ? `${title}: unavailable` :
+      `${title}: ${row.level ? 'HIGH' : 'LOW'}${row.level === row.active_level ? ' · active' : ' · idle'}${row.level_for_ms == null ? ' · last known' : ' for ' + sensorDuration(row.level_for_ms)} · ${row.trigger_count} alert${row.trigger_count === 1 ? '' : 's'} this boot${(row.active_level ? row.last_high_ms : row.last_low_ms) != null ? ' · last active ' + sensorDuration(row.active_level ? row.last_high_ms : row.last_low_ms) : ''}`);
+  }
+  text('timing-help', !timing?.supported ? 'Upload sensor-time-1 to measure levels and completed activity periods.' : timing.stale ? 'Camera status is stale; live duration is paused.' : 'PIR triggers on HIGH. Sound triggers on LOW; short pulses are grouped by its alert cooldown.');
+}
 function toast(message) {
   text('toast', message); $('toast').hidden = false;
   clearTimeout(toast.timer); toast.timer = setTimeout(() => { $('toast').hidden = true; }, 6500);
@@ -32,17 +43,22 @@ function setViewing(on) {
     $('stream').hidden = true;
     $('placeholder').hidden = false;
     $('viewport').classList.remove('playing');
+    paintFaceOverlay();
   }
 }
 $('stream').addEventListener('load', () => {
   if (!viewing) return;
   $('stream').hidden = false; $('placeholder').hidden = true;
   $('viewport').classList.add('playing'); text('video-state', 'Live'); $('video-state').classList.add('live');
+  paintFaceOverlay();
 });
 $('stream').addEventListener('error', () => {
   $('stream').hidden = true; $('placeholder').hidden = false;
+  paintFaceOverlay();
 });
 function render() {
+  paintFaceOverlay();
+  renderSensorTiming();
   const online = Boolean(state?.online), c = state?.camera || {};
   $('connection').className = 'connection ' + (online ? 'online' : 'offline');
   text('connection-label', online ? 'Camera connected' : 'Camera offline');
@@ -87,6 +103,7 @@ function render() {
 }
 let eventSignature = '';
 function renderEvents(events) {
+  events = events.filter(event => event.phase !== 'cleared' || !event.start_event_id);
   const signature = JSON.stringify(events);
   if (signature === eventSignature) return;
   eventSignature = signature; text('event-count', events.length);
@@ -100,9 +117,11 @@ function renderEvents(events) {
     const icon = document.createElement('span'); icon.className = 'event-icon' + (sound ? ' sound' : '');
     icon.innerHTML = `<svg aria-hidden="true"><use href="#i-${sound ? 'sound' : 'motion'}"/></svg>`;
     const content = document.createElement('div'); content.className = 'event-content';
-    const title = document.createElement('h3'); title.textContent = sound ? 'Sound detected' : event.type === 'motion' ? 'Motion detected' : 'Sensor event';
+    const title = document.createElement('h3'); title.textContent = (sound ? 'Sound' : event.type === 'motion' ? 'Motion' : 'Sensor') + (event.phase === 'cleared' ? ' cleared' : ' detected');
     const detail = document.createElement('p'); detail.textContent = `Camera uptime ${duration(event.uptime_ms)} · #${event.id}${event.source ? ' · ' + event.source.toUpperCase() : ''}`;
-    content.append(title, detail);
+    const timing = document.createElement('p'); timing.className = 'event-duration';
+    timing.textContent = event.duration_ms != null ? `${event.active ? 'Active for' : 'Was active for'} ${sensorDuration(event.duration_ms)}${event.active ? ' · ongoing' : ' · cleared'}` : event.phase === 'cleared' ? 'Start was not received; duration unavailable.' : event.phase ? 'End time not received.' : 'Historical event · duration was not recorded.';
+    content.append(title, detail, timing);
     const time = document.createElement('time'); time.dateTime = event.received_at;
     const received = new Date(event.received_at);
     time.textContent = received.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
@@ -210,6 +229,12 @@ function makeUnknownCard(face) {
   body.append(title, seen, form); card.append(img, body); return card;
 }
 function renderFaceData(data) {
+  faceOverlayService = data;
+  faceOverlay = data.live_detections || null;
+  faceOverlayUntil = performance.now() + Math.max(0, Math.min(5000, Number(faceOverlay?.valid_for_ms) || 0));
+  clearTimeout(faceOverlayTimer);
+  faceOverlayTimer = setTimeout(paintFaceOverlay, Math.max(0, faceOverlayUntil - performance.now()) + 1);
+  paintFaceOverlay();
   if (!faceSettingsBusy) $('face-monitoring').checked = data.enabled;
   const status = $('face-status');
   status.classList.toggle('warning', Boolean(data.error));
@@ -275,6 +300,46 @@ function renderFaceData(data) {
     const seen = document.createElement('span'); seen.textContent = faceTime(face.last_seen);
     item.append(image, name, seen); return item;
   }));
+}
+function paintFaceOverlay() {
+  const layer = $('face-overlay'), caption = $('face-overlay-status'), image = $('stream');
+  if (!layer) return;
+  layer.replaceChildren(); layer.setAttribute('hidden', '');
+  const showing = viewing && !image.hidden && Boolean(state?.online) && Boolean(state?.video.receiving);
+  caption.hidden = !showing;
+  if (!showing) return;
+  const service = faceOverlayService;
+  caption.textContent = !service ? 'Waiting for face check' : !service.enabled ? 'Face monitoring paused' : service.error ? 'Face checks unavailable' : 'Waiting for face check';
+  const data = faceOverlay;
+  if (!service?.enabled || service.error || !data || performance.now() >= faceOverlayUntil) return;
+  const width = Number(data.image_width), height = Number(data.image_height);
+  if (!(width > 0 && height > 0) || !Number.isFinite(width + height)) return;
+  if (image.naturalWidth && Math.abs(image.naturalWidth / image.naturalHeight - width / height) > .01) return;
+  layer.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  const make = (tag, attributes) => {
+    const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.entries(attributes).forEach(([name, value]) => node.setAttribute(name, value));
+    return node;
+  };
+  for (const face of (data.faces || []).slice(0, 12)) {
+    if (!Array.isArray(face.box) || face.box.length !== 4 || !face.box.every(Number.isFinite)) continue;
+    const [rawX, rawY, rawW, rawH] = face.box;
+    const x = Math.max(0, rawX), y = Math.max(0, rawY);
+    const w = Math.min(width, rawX + rawW) - x, h = Math.min(height, rawY + rawH) - y;
+    if (!(w > 0 && h > 0)) continue;
+    const group = make('g', {'class': face.matched ? 'matched-face' : 'unknown-face'});
+    group.append(make('rect', {x, y, width: w, height: h, 'class': 'face-box', 'stroke-width': Math.max(1.5, width / 400)}));
+    const font = Math.max(8, Math.min(14, width / 40)), line = font * 1.6;
+    const maxChars = Math.max(1, Math.floor((width - x - font) / (font * .62)));
+    const full = String(face.label || 'Unknown');
+    const label = full.length > maxChars ? full.slice(0, Math.max(0, maxChars - 1)) + '…' : full;
+    const labelY = Math.max(0, y - line);
+    group.append(make('rect', {x, y: labelY, width: Math.min(width - x, label.length * font * .62 + font), height: line, 'class': 'face-label-bg'}));
+    const text = make('text', {x: x + font / 2, y: labelY + line / 2, 'font-size': font, 'dominant-baseline': 'central', 'class': 'face-label'});
+    text.textContent = label; group.append(text); layer.append(group);
+  }
+  layer.removeAttribute('hidden');
+  caption.textContent = `Face checks ~3s · ${layer.childElementCount ? 'Latest detection' : 'No face found'}`;
 }
 async function refreshFaces() {
   const sequence = ++faceRequest;

@@ -100,7 +100,7 @@ class OpenCVEngine:
                 face[:14] /= scale
                 candidates.append(face)
         indices = cv.dnn.NMSBoxes([face[:4].tolist() for face in candidates], [float(face[-1]) for face in candidates], .9, .3) if candidates else []
-        result, rejected, reasons = [], 0, []
+        result, rejected, reasons, rejected_boxes = [], 0, [], []
         for index in np.asarray(indices).reshape(-1)[:12]:
             face = candidates[int(index)]
             x, y, w, h = [float(v) for v in face[:4]]
@@ -110,6 +110,8 @@ class OpenCVEngine:
             if crop.size == 0 or min(x2 - x1, y2 - y1) < 48:
                 rejected += 1
                 reasons.append("The face is too small. Crop closer to the face or use a higher-resolution photo.")
+                if crop.size:
+                    rejected_boxes.append({"box": [x1, y1, x2 - x1, y2 - y1], "reason": "too_small"})
                 continue
             # Comparing native-resolution Laplacians wrongly rejects enlarged
             # clear portraits. Measure on a fixed-sized face crop instead.
@@ -118,6 +120,7 @@ class OpenCVEngine:
             if blur < 35:
                 rejected += 1
                 reasons.append("The detected face looks blurry. Use a sharper photo with the eyes clearly visible.")
+                rejected_boxes.append({"box": [x1, y1, x2 - x1, y2 - y1], "reason": "blurry"})
                 continue
             aligned = self.recognizer.alignCrop(image, face)
             embedding = normalized(self.recognizer.feature(aligned))
@@ -128,7 +131,8 @@ class OpenCVEngine:
             result.append({"embedding": embedding, "thumbnail": encoded.tobytes(),
                            "quality": float(face[-1]) * min(w, h),
                            "box": [x1, y1, x2 - x1, y2 - y1]})
-        return {"faces": result, "rejected": rejected, "rejected_reasons": reasons}
+        return {"faces": result, "rejected": rejected, "rejected_reasons": reasons,
+                "image_width": width, "image_height": height, "rejected_boxes": rejected_boxes}
 
 
 class FaceStore:
@@ -215,6 +219,11 @@ class FaceStore:
             self.db.execute("DELETE FROM samples WHERE person_id=? AND id NOT IN (SELECT id FROM samples WHERE person_id=? ORDER BY created_at DESC LIMIT 20)", (person_id, person_id))
             self.db.execute("UPDATE sightings SET person_id=?,similarity=NULL WHERE id=?", (person_id, capture_id))
         return dict(self.db.execute("SELECT id,name,created_at FROM people WHERE id=?", (person_id,)).fetchone())
+
+    def overlay_label(self, capture_id):
+        row = self.db.execute("SELECT s.person_id,p.name FROM sightings s LEFT JOIN people p ON p.id=s.person_id WHERE s.id=?", (capture_id,)).fetchone()
+        return {"label": row["name"] if row and row["name"] else "Unknown",
+                "matched": bool(row and row["person_id"] and row["name"])}
 
     def enroll_photos(self, name, detections):
         name = validate_name(name)

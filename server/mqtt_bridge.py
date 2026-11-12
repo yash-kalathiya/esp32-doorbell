@@ -144,7 +144,7 @@ class MQTTBridge:
                 self.last_state, self.last_state_at = data, time.monotonic()
                 self.device_online = True
                 self.hub.status = data
-                self.hub.last_seen = self.hub.timestamp()
+                self.hub.mark_seen()
                 self.hub.online, self.hub.error = True, None
                 # Certificate-authenticated device discovery handles DHCP changes.
                 if data.get("ip"):

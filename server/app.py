@@ -12,6 +12,7 @@ import socket
 import sqlite3
 import time
 from urllib.parse import urlsplit
+from typing import Literal
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -58,6 +59,7 @@ class Event(BaseModel):
     id: int
     type: str
     uptime_ms: int
+    phase: Literal["triggered", "cleared"] | None = None
 
     @field_validator("device_id", "boot_id", "type")
     @classmethod
@@ -98,11 +100,15 @@ class CameraHub:
         if "source" not in [column[1] for column in self.db.execute("PRAGMA table_info(events)")]:
             self.db.execute("ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT 'http'")
             self.db.commit()
+        if "phase" not in [column[1] for column in self.db.execute("PRAGMA table_info(events)")]:
+            self.db.execute("ALTER TABLE events ADD COLUMN phase TEXT")
+            self.db.commit()
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(4, connect=2), transport=transport, trust_env=False)
         self.poll_interval = poll_interval
         self.status = None
         self.online = False
         self.last_seen = None
+        self.last_seen_at = 0
         self.error = "Waiting for the first camera check."
         self.boot_id = None
         self.cursor = 0
@@ -126,11 +132,29 @@ class CameraHub:
         self.face_last_checked = None
         self.face_count = 0
         self.face_rejected = 0
+        self.face_overlay = None
         self.config_generation = 0
         self.changed = asyncio.Event()
         self.mqtt = MQTTBridge(self, self.data_dir / "mqtt/gateway.json")
 
     timestamp = staticmethod(now)
+
+    def mark_seen(self):
+        self.last_seen, self.last_seen_at = now(), time.monotonic()
+
+    def sensor_activity(self):
+        camera = self.status or {}
+        levels = camera.get("sensor_levels")
+        if camera.get("sensor_timing_version") != 1 or not isinstance(levels, dict):
+            return {"supported": False}
+        age = int((time.monotonic() - self.last_seen_at) * 1000) if self.last_seen_at else 20000
+        fresh = self.online and 0 <= age < 15000
+        result = {"supported": True, "stale": not fresh}
+        for kind in ("motion", "sound"):
+            level = levels.get(kind)
+            if isinstance(level, dict):
+                result[kind] = {**level, "level_for_ms": level.get("level_for_ms", 0) + age if fresh else None}
+        return result
 
     async def discover_camera(self, ip):
         try:
@@ -141,10 +165,17 @@ class CameraHub:
             logging.getLogger(__name__).warning("MQTT device reported an invalid camera IP")
 
     def face_status(self):
+        overlay = self.face_overlay
+        remaining = 5000 - int((time.monotonic() - overlay["captured_at"]) * 1000) if overlay else 0
+        if (remaining <= 0 or not self.settings.face_monitoring or self.face_error or not self.online
+                or self.frame is None or time.monotonic() - self.last_frame_at >= 2
+                or (overlay and overlay["boot_id"] != (self.status or {}).get("boot_id"))):
+            overlay = None
         return {"model_state": self.face_state, "enabled": self.settings.face_monitoring,
                 "camera_online": self.online, "error": self.face_error,
                 "last_checked": self.face_last_checked, "faces_in_last_check": self.face_count,
                 "low_quality_faces": self.face_rejected,
+                "live_detections": ({**overlay["data"], "valid_for_ms": remaining} if overlay else None),
                 **self.faces.gallery(self.settings.camera_url)}
 
     async def detect_faces(self, image):
@@ -174,19 +205,32 @@ class CameraHub:
                             await asyncio.sleep(1)
                             continue
                         jpeg, previous_frame = self.frame, self.frame_id
+                        captured_at = self.last_frame_at
+                        captured_boot = (self.status or {}).get("boot_id")
                     else:
                         response = await self.client.get(base + "/api/snapshot")
                         response.raise_for_status()
                         jpeg = response.content
                     result = await self.detect_faces(jpeg)
                     if generation == self.config_generation and self.settings.face_monitoring:
+                        boxes = []
                         for face in result["faces"]:
-                            self.faces.observe(face, base)
+                            identifier = self.faces.observe(face, base)
+                            if face.get("box"):
+                                boxes.append({"box": face["box"], **self.faces.overlay_label(identifier), "quality": "usable"})
+                        for face in result.get("rejected_boxes", []):
+                            boxes.append({"box": face["box"], "label": "Move closer" if face["reason"] == "too_small" else "Improve lighting",
+                                          "matched": False, "quality": face["reason"]})
+                        self.face_overlay = ({"captured_at": captured_at, "boot_id": captured_boot,
+                            "data": {"frame_id": previous_frame, "image_width": result["image_width"],
+                                     "image_height": result["image_height"], "faces": boxes}}
+                            if receiving and result.get("image_width") and result.get("image_height") else None)
                         self.face_last_checked = now()
                         self.face_count = len(result["faces"])
                         self.face_rejected = result["rejected"]
                         self.face_error = None
                 except Exception:
+                    self.face_overlay = None
                     if generation == self.config_generation:
                         self.face_error = "Face check failed. Retrying when a readable camera image is available."
                     logging.getLogger(__name__).warning("Face check failed", exc_info=True)
@@ -195,8 +239,9 @@ class CameraHub:
     def save_event(self, event, camera_url=None, source="http"):
         e = Event.model_validate(event)
         base = camera_url or self.settings.camera_url
-        self.db.execute("INSERT OR IGNORE INTO events(camera_url,device_id,boot_id,id,type,uptime_ms,received_at,source) VALUES (?,?,?,?,?,?,?,?)", (
-            base, e.device_id, e.boot_id, e.id, e.type, e.uptime_ms, now(), source))
+        self.db.execute("INSERT OR IGNORE INTO events(camera_url,device_id,boot_id,id,type,uptime_ms,received_at,source,phase) VALUES (?,?,?,?,?,?,?,?,?)", (
+            base, e.device_id, e.boot_id, e.id, e.type, e.uptime_ms, now(), source, e.phase))
+        self.db.execute("UPDATE events SET phase=COALESCE(phase,?) WHERE camera_url=? AND device_id=? AND boot_id=? AND id=?", (e.phase, base, e.device_id, e.boot_id, e.id))
         self.db.execute("UPDATE events SET source='mqtt+http' WHERE camera_url=? AND device_id=? AND boot_id=? AND id=? AND source<>?", (base, e.device_id, e.boot_id, e.id, source))
         # Bound local retention; duplicates keep their original first-received time.
         self.db.execute("DELETE FROM events WHERE rowid NOT IN (SELECT rowid FROM events ORDER BY rowid DESC LIMIT 2000)")
@@ -204,8 +249,34 @@ class CameraHub:
         self.changed.set()
 
     def events(self):
-        rows = self.db.execute("SELECT device_id,boot_id,id,type,uptime_ms,received_at,source FROM events WHERE camera_url=? ORDER BY rowid DESC LIMIT 100", (self.settings.camera_url,)).fetchall()
-        return [dict(zip(("device_id", "boot_id", "id", "type", "uptime_ms", "received_at", "source"), row)) for row in rows]
+        rows = self.db.execute("""WITH ordered AS (
+            SELECT rowid AS stored_order,device_id,boot_id,id,type,uptime_ms,received_at,source,phase,
+              LAG(id) OVER sensor AS previous_id,LAG(phase) OVER sensor AS previous_phase,
+              LAG(uptime_ms) OVER sensor AS previous_ms,LEAD(phase) OVER sensor AS next_phase,
+              LEAD(uptime_ms) OVER sensor AS next_ms
+            FROM events WHERE camera_url=?
+            WINDOW sensor AS (PARTITION BY device_id,boot_id,type ORDER BY id)
+          ) SELECT device_id,boot_id,id,type,uptime_ms,received_at,source,phase,
+                   previous_id,previous_phase,previous_ms,next_phase,next_ms
+            FROM ordered ORDER BY stored_order DESC LIMIT 100""", (self.settings.camera_url,)).fetchall()
+        result = []
+        camera = self.status or {}
+        activity = self.sensor_activity()
+        for row in rows:
+            item = dict(zip(("device_id", "boot_id", "id", "type", "uptime_ms", "received_at", "source", "phase"), row[:8]))
+            previous_id, previous_phase, previous_ms, next_phase, next_ms = row[8:]
+            item.update(duration_ms=None, active=False, start_event_id=None)
+            if item["phase"] == "cleared" and previous_ms is not None and previous_phase in (None, "triggered"):
+                item.update(duration_ms=(item["uptime_ms"] - previous_ms) & 0xffffffff, start_event_id=previous_id)
+            elif item["phase"] in (None, "triggered") and next_phase == "cleared":
+                item["duration_ms"] = (next_ms - item["uptime_ms"]) & 0xffffffff
+            elif item["phase"] == "triggered" and item["boot_id"] == camera.get("boot_id") and item["device_id"] == camera.get("device_id"):
+                level = activity.get(item["type"], {})
+                if not activity.get("stale", True) and level.get("active_event_id") == item["id"]:
+                    age = max(0, int((time.monotonic() - self.last_seen_at) * 1000))
+                    item.update(active=True, duration_ms=((camera["uptime_ms"] - item["uptime_ms"]) & 0xffffffff) + age)
+            result.append(item)
+        return result
 
     def state(self):
         return {"online": self.online, "camera_url": self.settings.camera_url,
@@ -213,7 +284,8 @@ class CameraHub:
                 "camera": self.status, "video": {"viewers": self.viewers,
                 "receiving": self.producer is not None and self.frame is not None and time.monotonic() - self.last_frame_at < 5,
                 "error": self.stream_error}, "events_lost": self.events_lost,
-                "mqtt": self.mqtt.status(), "control_transport": "mqtt" if self.mqtt.ready() else "http"}
+                "mqtt": self.mqtt.status(), "control_transport": "mqtt" if self.mqtt.ready() else "http",
+                "sensor_activity": self.sensor_activity()}
 
     async def poll_once(self):
         base = self.settings.camera_url
@@ -226,6 +298,7 @@ class CameraHub:
             if base != self.settings.camera_url:
                 return
             self.status, self.online, self.last_seen, self.error = status, True, now(), None
+            self.mark_seen()
             if status["boot_id"] != self.boot_id:
                 self.boot_id, self.cursor = status["boot_id"], 0
             response = await self.client.get(base + "/api/events", params={"after": self.cursor})
@@ -263,6 +336,7 @@ class CameraHub:
                 try:
                     self.status = await self.mqtt.command(action)
                     self.last_seen, self.online, self.error = now(), True, None
+                    self.mark_seen()
                     self.changed.set()
                     return self.state()
                 except (ConnectionError, TimeoutError, ValueError) as exc:
@@ -274,6 +348,7 @@ class CameraHub:
                 if not isinstance(status, dict) or "boot_id" not in status:
                     raise ValueError("Invalid camera status")
                 self.status, self.online, self.last_seen, self.error = status, True, now(), None
+                self.mark_seen()
                 self.changed.set()
                 return self.state()
             except (httpx.HTTPError, ValueError) as exc:
@@ -351,6 +426,8 @@ class CameraHub:
                 await self.stop_producer()
             self.settings = settings
             self.config_generation += 1
+            if camera_changed or not settings.face_monitoring:
+                self.face_overlay = None
             target = self.data_dir / "settings.json"
             temporary = target.with_suffix(".tmp")
             temporary.write_text(settings.model_dump_json())

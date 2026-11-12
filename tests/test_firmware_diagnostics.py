@@ -67,16 +67,18 @@ inline esp_reset_reason_t esp_reset_reason() { return ESP_RST_TASK_WDT; }
 #include <cassert>
 #include <climits>
 #include <cstring>
+#include <string>
 #include <WiFi.h>
 #include "doorbell_diagnostics.h"
 #include "doorbell_memory.h"
+#include "doorbell_levels.h"
 uint32_t clockMs=0, available=4000, largest=2500;
 cJSON *at(cJSON *j, const char *key) { auto *v=cJSON_GetObjectItemCaseSensitive(j,key); assert(v); return v; }
 int main() {
   doorbellMemoryBegin();
   doorbellDiagnosticsBegin();
   cJSON *initial=cJSON_CreateObject(); doorbellDiagnosticsStatus(initial);
-  assert(!strcmp(at(initial,"firmware_version")->valuestring,"mqtt-mem-1"));
+  assert(!strcmp(at(initial,"firmware_version")->valuestring,"sensor-time-1"));
   assert(cJSON_IsNull(at(at(at(initial,"diagnostics"),"mqtt"),"last_error")));
   cJSON_Delete(initial);
   clockMs=100;
@@ -116,6 +118,19 @@ int main() {
   cJSON *decoded=cJSON_Parse(text); assert(decoded);
   assert(at(at(at(decoded,"diagnostics"),"mqtt"),"last_error"));
   cJSON_Delete(decoded); cJSON_free(text); cJSON_Delete(j);
+  // Conservative whole-status budget: actual diagnostic and GPIO serializers
+  // plus 1,400 bytes reserved for the remaining camera/MQTT fields.
+  j=cJSON_CreateObject();doorbellDiagnosticsStatus(j);
+  doorbellMemoryStatus(at(at(j,"diagnostics"),"memory"));
+  std::string base(1400,'x');cJSON_AddStringToObject(j,"base_status_budget",base.c_str());
+  auto *levels=cJSON_AddObjectToObject(j,"sensor_levels");
+  DoorbellLevel::Snapshot level;level.initialized=level.high=level.completedHigh=level.completedLow=true;
+  level.highPeriods=level.lowPeriods=level.lastHighMs=level.lastLowMs=UINT32_MAX;
+  cJSON_AddItemToObject(levels,"motion",doorbellLevelJson(level,UINT32_MAX,true,UINT32_MAX,UINT32_MAX));
+  cJSON_AddItemToObject(levels,"sound",doorbellLevelJson(level,UINT32_MAX,false,UINT32_MAX,UINT32_MAX));
+  assert(at(at(levels,"sound"),"active_level")->valueint==0);
+  text=doorbellMqttJsonPrint(j);assert(text && strlen(text)<4096);
+  cJSON_free(text);cJSON_Delete(j);
 }
 ''')
     binary = tmp_path / "check"
@@ -123,5 +138,6 @@ int main() {
         f"-I{tmp_path}", f"-I{include}", f"-I{ROOT / 'firmware/Doorbell'}",
         str(harness), str(ROOT / "firmware/Doorbell/doorbell_diagnostics.cpp"),
         str(ROOT / "firmware/Doorbell/doorbell_memory.cpp"),
+        str(ROOT / "firmware/Doorbell/doorbell_levels.cpp"),
         f"-l:{library}", "-o", str(binary)], check=True, capture_output=True, text=True)
     subprocess.run([str(binary)], check=True, capture_output=True, text=True)

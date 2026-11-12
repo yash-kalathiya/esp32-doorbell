@@ -6,8 +6,8 @@ TLS carries device events and commands; HTTP carries MJPEG video.
 
 ## Dashboard screenshots
 
-Captured from the running dashboard. The desktop and phone-width views show the
-real device connected through MQTT, SSE updates, and saved sensor activity.
+Captured from the running dashboard using the current Home-style interface.
+The views show the real device status and saved sensor activity.
 Camera imagery is masked for privacy; personal face photos and names are omitted.
 The phone view uses a mobile browser viewport on the laptop.
 
@@ -17,10 +17,11 @@ The phone view uses a mobile browser viewport on the laptop.
 | --- | --- |
 | <img src="docs/screenshots/dashboard-mobile.png" alt="Dashboard at a 390-pixel phone viewport" width="280"> | <img src="docs/screenshots/face-photo-upload.png" alt="Upload face photos and enter a name to enroll a person" width="480"> |
 
-Face recognition can be tested with an uploaded photo or the browser device's
-camera without adding test images to the saved gallery:
+Completed CSI pilot, with capture stopped and the saved real empty/walking trials
+shown below. These results are from one 1.5 m router-to-camera placement and do
+not establish coverage or detection accuracy.
 
-![Face recognition controls with device-camera and photo-upload test options](docs/screenshots/face-recognition.png)
+![CSI pilot showing the saved matched video-off trial comparison](docs/screenshots/csi-pilot.png)
 
 ## First setup after cloning
 
@@ -99,9 +100,8 @@ The sound module supplies digital threshold events, not microphone audio.
 
 The dashboard follows the Apple Home app layout: a laptop sidebar, phone bottom
 navigation, compact status tiles and a prominent camera view. People and unknown
-face review stay visible; **Test recognition**, **Sensor details**, and
-**Connection details** expand on demand. Closing the recognition test stops any
-device camera it opened. Touch controls and accessibility fallbacks remain.
+face review stay visible; **Sensor details** and **Connection details** expand
+on demand. Touch controls and accessibility fallbacks remain.
 
 The camera light is **automatic**, using **50% PWM only when the image is dark**.
 It remains off at boot. The laptop estimates image brightness every three seconds
@@ -125,9 +125,9 @@ reconnection/reboot and their confirmation is shown beside the button. Older
 firmware can use the existing `/control` endpoint until the new sketch is uploaded.
 
 Open `firmware/Doorbell/Doorbell.ino` with **all files in that sketch directory**
-and upload once. The build identifies itself as `night-light-1`; it includes the
-prior memory optimizations and sensor timing. Compilation used **1,296,969 bytes
-of flash and 76,416 bytes of static RAM**. All 58 automated tests and the isolated
+and upload once. The build identifies itself as `csi-pilot-1`; it includes the
+prior memory optimizations and sensor timing. Compilation used **1,301,549 bytes
+of flash and 76,744 bytes of static RAM**. All 76 automated tests and the isolated
 real-model browser checks passed. Physical lighting thresholds and persistence
 still require validation after upload.
 
@@ -153,7 +153,7 @@ the current boot. PIR is active **HIGH**; the current sound module is active
 one motion activation until it clears and rises again. Sound alerts still use
 the existing cooldown; short raw pin periods are not separate accepted alerts.
 
-Upload the new `night-light-1` firmware for timing support; it includes the
+Upload the current `csi-pilot-1` firmware for timing support; it includes the
 `mqtt-mem-1` PSRAM optimizations. The laptop overlay works without this reflash.
 Status includes `sensor_timing_version: 1` and `sensor_levels` with current
 level duration, HIGH/LOW period counts, completed durations, current active
@@ -269,7 +269,9 @@ activity and face data over `/api/updates`; HTTP polling is a reconnect fallback
 This is the **local project milestone**. The broker transport is encrypted and
 certificate-authenticated. The existing camera HTTP API and dashboard HTTP
 listener remain LAN prototype interfaces without user login. Remote access,
-browser HTTPS deployment, WebRTC and Wi-Fi CSI sensing are outside this milestone.
+browser HTTPS deployment and WebRTC remain outside the local milestone.
+The separate CSI pilot below has completed initial physical trials; reliability,
+coverage and human-detection accuracy remain unvalidated.
 
 ### Connection diagnostics firmware
 
@@ -277,8 +279,8 @@ The first diagnostic build identified itself as `mqtt-diag-1`; the memory
 optimization build reports `"firmware_version":"mqtt-mem-1"` in the ESP32's
 `/api/status` response and MQTT state. Upload the complete
 `firmware/Doorbell/` sketch, including its new `doorbell_diagnostics.cpp` and
-`.h` tabs. The newer `night-light-1` build includes those optimizations and
-adds sensor timing. Neither build needs a broker configuration update.
+`.h` tabs. The current `csi-pilot-1` build includes those optimizations, sensor timing,
+Night mode and optional CSI capture. Neither build needs a broker configuration update.
 
 After uploading, remove the IO0–GND jumper with power disconnected, restart the
 board, and open `http://ESP32_IP/api/status`. The laptop's `/api/status` also
@@ -512,55 +514,6 @@ Only face crops and embeddings are retained. Original uploads are closed after
 processing and are not retained as enrollment files or logged. Uploaded photos
 are not recorded as camera sightings. Profiles retain their newest 20 samples.
 
-### Test recognition with a photo or this device's camera
-
-The **Test recognition** panel compares a photo with saved profiles without
-enrolling anyone, saving test images, or changing face/activity history. Choose
-a test photo and select **Run test**, or choose **Use device camera** to preview
-the camera attached to the device opening the page. **Front / selfie camera**
-and **Back camera** request the corresponding camera when available.
-
-Live tests send one sampled frame to the laptop about every two seconds, with
-one request at a time. No microphone access is requested. **Stop camera**, leaving
-the page, or hiding the page releases the camera and stops live checks. Results
-show each usable face crop, its matched name or **Unknown**, and cosine similarity
-(not a probability). Use different photos from enrollment to assess recognition
-rather than testing only an exact copy of a saved image.
-
-Browser camera access requires a secure context. On the laptop open
-`http://localhost:8000/#faces` (or `http://127.0.0.1:8000/#faces`). A phone opening
-`http://LAPTOP_IP:8000` cannot grant continuous live camera access. The panel
-explains this and offers **Take photo**, which requests native photo capture on
-supported mobile browsers; other browsers may show a file picker. Continuous
-phone camera access needs the dashboard served over HTTPS with a certificate
-trusted by that phone. HTTPS/certificate trust has not been configured by this
-change. The page also works on an existing trusted HTTPS deployment.
-
-**Monitor faces** pauses/resumes automatic image checks and is saved across
-restarts. **Stop** in the video pane only controls live viewing; pause face
-monitoring separately to stop background snapshots. The camera remains powered.
-
-Models are downloaded once from the official OpenCV Zoo, with SHA-256 checks
-against its Git LFS records. The YuNet model is MIT licensed; SFace is Apache
-2.0 licensed (copies are in `models/`). Inference and enrollment run locally;
-camera images and face profiles are not sent to an external recognition API.
-If models are missing or invalid, the rest of the dashboard still works and
-the face section reports the setup problem. Run the model download script and
-restart the server to recover.
-
-Face photos, normalised embeddings, names and observation timestamps are stored
-in `.local-data/faces.sqlite3`. Retention is bounded to 100 unknown capture
-groups, 300 recognised capture groups, 100 profiles and 20 samples per profile.
-Captures are scoped to the configured camera address; profiles are shared across
-camera address changes. Repeated similar unknown observations are grouped as a
-review aid; these groups are not verified unique people or movement tracks.
-
-Small faces (under 48 pixels) and blurry crops are skipped. Matching starts at
-cosine similarity 0.50 with a 0.08 margin over the next profile; close or weak
-matches remain unknown. These are initial operating thresholds, not calibrated
-probabilities or a promised accuracy. Validate with real camera images, varied
-lighting, and both enrolled and unenrolled people before relying on alerts.
-This version has no liveness detection or automatic Wi-Fi identity tracking.
 
 ### Laptop API (port 8000)
 
@@ -586,7 +539,6 @@ These are the laptop endpoints; the firmware endpoints below run on the camera.
 | GET | `/api/people/{id}/image` | Profile thumbnail |
 | DELETE | `/api/people/{id}` | Remove a profile, samples and associated face captures |
 | POST | `/api/people/upload` | Multipart `name` + repeated `files` fields; enroll usable photo samples |
-| POST | `/api/faces/test` | Multipart `file`; return transient face-match results without saving |
 
 `POST /api/people/upload` also accepts `burst=true` and an optional `capture_id`
 reference for reviewed burst enrollment. Per-frame results distinguish added,
@@ -629,12 +581,10 @@ curl -fsSL -o artifacts/face-model-test.jpg \
 .venv/bin/python scripts/check-faces-ui.py
 ```
 
-That test verifies the name-and-save flow and recognition of a subsequent
-sample image, real-model upload enrollment, read-only photo tests, and sampled
-live recognition through Chrome's simulated video camera. It also checks camera
-release and the insecure-origin HTTPS guidance. It is not an evaluation of new
-viewpoints, household accuracy, physical webcams or mobile browser permissions.
-No test identities or sample images are inserted into the running gallery.
+That check verifies enrollment, overlays, ESP32 burst review and real-model
+photo upload in an isolated gallery. It does not measure household accuracy or
+physical CSI sensing. No test identities or sample images are inserted into the
+running gallery.
 
 MQTT integration testing uses a real Mosquitto container, fresh test identities,
 an isolated database and a simulated device. It tests TLS client authentication,
@@ -664,41 +614,119 @@ TCP/IP** carries video/snapshots and remains the legacy/fallback control path.
 | Live camera video | Laptop GET `http://ESP_IP:81/api/stream` | MJPEG: successive JPEG images in an HTTP multipart response |
 | Status and sensor events | MQTT TLS port 8883; HTTP `/api/status`, `/api/events` fallback | JSON |
 | Snapshot | Laptop GET port 80 `/api/snapshot` | JPEG |
+| CSI pilot | ESP32 → laptop UDP 5005, when enabled | ADR-018 binary I/Q frames |
 | Live controls | MQTT command + application ACK; HTTP port 80 fallback | JSON |
 | Optional sensor callback | ESP32 POST to the configured laptop event URL | JSON over HTTP |
 | Phone dashboard | Browser connects to laptop port 8000 | HTTP, SSE updates, relayed MJPEG |
-| Device-camera recognition test | Browser POST `/api/faces/test` about every two seconds | Sampled JPEG frames in multipart form data |
 
-There is no WebRTC, RTSP or CSI transport in the current camera firmware.
+There is no WebRTC or RTSP transport. CSI is available only after uploading
+the pilot firmware and explicitly starting a session.
 USB serial is used for uploading/debugging, not normal power-bank operation.
 
-**CSI research is not enabled in this project yet.** Espressif documents CSI
-support on the original ESP32 as well as newer ESP32 variants. The locally
-installed ESP32 Arduino core 3.3.12 exposes `esp_wifi_set_csi_rx_cb`,
-`esp_wifi_set_csi_config` and `esp_wifi_set_csi`; its ESP32 configuration has
-`CONFIG_ESP_WIFI_CSI_ENABLED=1`. This establishes software capability, not
-working capture or reliable sensing on this physical board.
+### CSI pilot with the existing ESP32-CAM
 
-An experiment on the current ESP32-CAM would add a bounded CSI callback queue
-and a separate UDP sender, then measure actual received packet cadence, losses,
-and camera performance with CSI off/on. Test empty-room and walking periods on
-the home network before implementing occupancy decisions. The camera and laptop
-must be reachable on the same LAN. No CSI firmware was flashed during this review.
+The **Wi-Fi sensing** panel is an experimental single-link pilot using the
+current ESP32-CAM, its 2.4 GHz router connection and the laptop. The laptop may
+stay on the router's 5 GHz band if both bands share the same LAN. No additional
+CSI hardware is required to attempt capture. Human detection accuracy and useful
+coverage are not established by the software tests.
 
-For RuView compatibility, raw measurements need its ADR-018 binary framing.
-Its sensing server receives node data on **UDP 5005** and offers processed
-results over HTTP/WebSocket. Our laptop server could consume those results and
-show a separate presence/motion panel. RuView's documented main node target is
-ESP32-S3; its supplied S3 firmware is not a drop-in image for the ESP32-CAM.
-A dedicated supported node is an alternative to porting capture on this board.
+Upload the complete **`csi-pilot-1`** sketch. CSI is **off at every boot** and
+configuration is runtime-only. No new firmware upload is needed to start/stop
+subsequent sessions or change the laptop destination. The dashboard derives its
+reachable LAN address when **Start pilot** is selected. A boot, Wi-Fi disconnect,
+internal heap pressure or ten-minute lease ends capture; restart and recalibrate
+afterward.
 
-One radio link is mainly a presence/motion experiment. Multiple spatial links
-and room calibration are needed to evaluate location/track separation. A Wi-Fi
-motion event does not automatically identify the person seen by the camera.
+The firmware requests LLTF CSI from the associated AP only, stimulates responses
+with bounded ICMP echo requests, and caps accepted frames at **20 Hz**. It does
+not enable promiscuous capture, change channels or allocate an additional RTOS
+worker stack. A four-slot **1,112-byte PSRAM queue** separates the Wi-Fi callback
+from socket sending. The callback performs bounded framing/copying only.
+Insufficient PSRAM or internal heap returns a start error. Capture requires at
+least 8,192 free internal bytes and a 2,048-byte largest block at start; it stops
+if sampled free space falls below 4,096 or the largest block below 1,536 bytes.
+These guards reduce pressure. Initial physical video/TLS coexistence testing
+triggered a heap stop; sustained combined operation still needs validation.
 
-References: [Espressif ESP-CSI](https://github.com/espressif/esp-csi),
-[RuView node firmware and wire format](https://github.com/ruvnet/RuView/blob/main/firmware/esp32-csi-node/README.md),
-[RuView live-data server](https://github.com/ruvnet/RuView/blob/main/docs/user-guide.md#esp32-s3-full-csi).
+Frames use RuView's **ADR-018** 20-byte little-endian header (`0xC5110001`) plus
+32–256 bytes of ESP-IDF imaginary/real pairs, over **UDP 5005** by default. The
+invalid four-byte prefix is zeroed and flagged. The laptop accepts only the
+configured camera IP, node 1, current session sequence range and bounded frame
+geometry; UDP is not cryptographically authenticated. This is a small receiver
+and signal-analysis implementation, not a running RuView pose/identity model.
+No simulated-data fallback exists in the dashboard.
+
+The analysis normalizes per-frame subcarrier magnitudes by RMS amplitude and
+aggregates the median change between adjacent frames into one-second windows.
+A 60-second empty-room calibration requires at least 40 valid windows with at
+least 5 samples per window. Its heuristic threshold uses the baseline median and
+MAD, with a minimum 0.015. Two elevated windows assert **Elevated signal**; three below the baseline plus
+40% of its gap to the threshold restore **Quiet signal**. Three seconds without data
+means **No data**, never an empty-room claim. A channel/geometry change invalidates
+the baseline. These are project heuristics, not a validated human classifier.
+
+1. Keep the camera and router fixed. Upload `firmware/Doorbell/Doorbell.ino` with
+   all sketch tabs, remove the IO0–GND jumper with power off, then reboot normally.
+2. Refresh the dashboard and select **Wi-Fi → Start pilot**. Check actual packet
+   rate; 20 Hz is a capture limit/target, not a guaranteed delivered rate.
+3. If no packets arrive, check the displayed stop reason, the laptop destination,
+   UDP port 5005/firewall and router ICMP responses. Do not substitute simulated
+   results. `DOORBELL_CSI_PORT` changes the laptop's UDP listen port if necessary.
+4. Leave the room and select **Calibrate empty room**. Keep the radio/video mode
+   consistent during the 60-second baseline.
+5. Expand **Record a pilot trial**. Record **empty room · 30s**, then a separate
+   **walking · 30s** run with someone moving through the intended area. Export CSVs.
+6. Repeat with video running. Compare change scores, packet gaps, internal heap,
+   MQTT availability and stream errors. Repeat with non-human disturbances such
+   as a fan to assess false detections before building any intrusion rule.
+
+CSV and JSON summaries are stored locally under `.local-data/csi/`. Only aggregate
+signal/health measurements are written, not raw I/Q frames or camera images.
+A completed recording means its time elapsed; inspect valid-window counts to
+judge data quality. The dashboard lists the latest six runs; up to 100 runs can be recorded before
+export/removal is required. Interrupted runs are explicitly marked. Recordings
+are manually labelled and do not establish ground-truth occupancy automatically.
+
+Laptop endpoints: GET `/api/csi`, POST `/api/csi/start`, `/api/csi/stop`,
+`/api/csi/calibrate`, `/api/csi/record-empty`, `/api/csi/record-walking`, and
+GET `/api/csi/recordings/{id}`. The ESP32 accepts POST `/api/csi/config` with
+`{"enabled":true,"host":"LAPTOP_LAN_IP","port":5005}` or `{"enabled":false}`.
+Its HTTP/MQTT status contains `csi_pilot` counters, stop reason and session seed.
+
+One radio link supplies anonymous signal-change evidence. A face sighting does
+not by itself establish entry/exit, and CSI does not identify that person.
+Named tracking and intrusion alerts are future work after physical validation.
+
+Physical pilot on November 12, 2026: the router and ESP32 were reported 1.5 m
+apart in the same room. Real CSI arrived at approximately **14–16.4 Hz**, using
+64 complex samples at 2,437 MHz, with zero receiver sequence gaps/rejections in
+the observed intervals. Empty-room calibration completed. A sampled 60-second
+interval with video receiving produced 1,653 additional stream frames, MQTT
+online at every sample and no added stream errors.
+
+A later internal-heap guard stopped CSI while video was running. The camera
+remained online. Boot low-water readings during the recorded trials fell to 1,472 bytes, so
+long-running combined operation is not qualified. The guard was
+kept; no successful continuous-operation claim is made.
+
+After restarting CSI, **matched video-off** recordings each contained 30 valid
+windows: mean normalized change **0.0219 empty** versus **0.1277 walking** (about
+**5.8×**). These manually labelled, single-placement trials are evidence of a
+signal difference, not detection accuracy, coverage radius, human identity or
+proof of intrusion. The older video-on baseline is retained but not used for
+that matched comparison. CSVs are downloadable under **Record a pilot trial**;
+the dashboard shows a comparison only for completed runs with the same boot,
+radio geometry and single video mode. Capture was stopped after the trials.
+
+Implementation references: [Espressif router CSI example](https://github.com/espressif/esp-csi/tree/master/examples/get-started/csi_recv_router),
+[ESP-IDF CSI callback guidance](https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32/api-guides/wifi.html#wi-fi-channel-state-information),
+[RuView framing](https://github.com/ruvnet/RuView/blob/main/firmware/esp32-csi-node/main/csi_collector.c).
+
+Developer verification uses `pytest` plus `scripts/check-csi.py`. The latter uses
+**synthetic loopback UDP and an accelerated clock**, clearly separated from real
+Wi-Fi measurements. It checks framing, calibration states, CSVs, stale-data
+handling, controls and mobile layout; it does not validate physical sensing.
 
 ## Firmware upload
 

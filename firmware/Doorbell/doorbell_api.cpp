@@ -11,6 +11,7 @@
 #include "doorbell_mqtt.h"
 #include "doorbell_diagnostics.h"
 #include "doorbell_memory.h"
+#include "doorbell_csi.h"
 #include "doorbell_levels.h"
 #include <hal/gpio_ll.h>
 #include <soc/gpio_struct.h>
@@ -168,6 +169,7 @@ cJSON *statusJson() {
   cJSON_AddNumberToObject(json, "callback_events_lost", lost);
   cJSON_AddNumberToObject(json, "callback_last_status", deliveryStatus);
   cJSON_AddStringToObject(json, "stream_path", ":81/api/stream");
+  doorbellCsiStatus(json);
   doorbellMqttStatus(json);
   doorbellDiagnosticsStatus(json);
   cJSON *diagnostics = cJSON_GetObjectItemCaseSensitive(json, "diagnostics");
@@ -307,6 +309,31 @@ esp_err_t apiConfigPost(httpd_req_t *req) {
   return apiConfigGet(req);
 }
 
+esp_err_t apiCsiConfig(httpd_req_t *req) {
+  char body[160];
+  if (req->content_len <= 0 || req->content_len >= sizeof(body))
+    return jsonError(req, "400 Bad Request", "Expected enabled, host and port");
+  size_t used = 0;
+  while (used < req->content_len) {
+    int n = httpd_req_recv(req, body+used, req->content_len-used);
+    if (n <= 0) return jsonError(req, "408 Request Timeout", "Incomplete CSI configuration");
+    used += n;
+  }
+  body[used] = 0;
+  cJSON *json = cJSON_ParseWithLengthOpts(body, used+1, nullptr, true);
+  cJSON *on = cJSON_GetObjectItemCaseSensitive(json, "enabled");
+  cJSON *host = cJSON_GetObjectItemCaseSensitive(json, "host");
+  cJSON *port = cJSON_GetObjectItemCaseSensitive(json, "port");
+  bool start = cJSON_IsTrue(on);
+  if (!cJSON_IsBool(on) || (start && (!cJSON_IsString(host) || !cJSON_IsNumber(port) || port->valuedouble != port->valueint || port->valueint <= 0 || port->valueint > 65535))) {
+    cJSON_Delete(json); return jsonError(req, "400 Bad Request", "Invalid CSI configuration");
+  }
+  esp_err_t result = doorbellCsiConfigure(start, start ? host->valuestring : "", start ? port->valueint : 0);
+  cJSON_Delete(json);
+  if (result != ESP_OK) return jsonError(req, "503 Service Unavailable", "CSI could not start; check WiFi, PSRAM and destination");
+  return apiStatus(req);
+}
+
 void registerRoute(httpd_handle_t server, const char *path, httpd_method_t method,
                    esp_err_t (*handler)(httpd_req_t *)) {
   httpd_uri_t uri = {};
@@ -385,6 +412,7 @@ void doorbellRegisterApi(httpd_handle_t server) {
   registerRoute(server, "/api/light/stop", HTTP_POST, apiLightStop);
   registerRoute(server, "/api/night/start", HTTP_POST, apiNightStart);
   registerRoute(server, "/api/night/stop", HTTP_POST, apiNightStop);
+  registerRoute(server, "/api/csi/config", HTTP_POST, apiCsiConfig);
   registerRoute(server, "/api/config", HTTP_GET, apiConfigGet);
   registerRoute(server, "/api/config", HTTP_POST, apiConfigPost);
 }

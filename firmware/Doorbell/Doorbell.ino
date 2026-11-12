@@ -6,6 +6,7 @@
 #include "doorbell_mqtt.h"
 #include "doorbell_diagnostics.h"
 #include "doorbell_memory.h"
+#include "doorbell_csi.h"
 
 // ===========================
 // Select camera model in board_config.h
@@ -174,6 +175,7 @@ void loop() {
     Serial.print("WiFi reconnected. Camera: http://");
     Serial.println(WiFi.localIP());
   }
+  doorbellCsiPoll();
   doorbellPoll();
   delay(20);
 }

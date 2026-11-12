@@ -78,7 +78,7 @@ int main() {
   doorbellMemoryBegin();
   doorbellDiagnosticsBegin();
   cJSON *initial=cJSON_CreateObject(); doorbellDiagnosticsStatus(initial);
-  assert(!strcmp(at(initial,"firmware_version")->valuestring,"night-light-1"));
+  assert(!strcmp(at(initial,"firmware_version")->valuestring,"csi-pilot-1"));
   assert(cJSON_IsNull(at(at(at(initial,"diagnostics"),"mqtt"),"last_error")));
   cJSON_Delete(initial);
   clockMs=100;
@@ -119,10 +119,10 @@ int main() {
   assert(at(at(at(decoded,"diagnostics"),"mqtt"),"last_error"));
   cJSON_Delete(decoded); cJSON_free(text); cJSON_Delete(j);
   // Conservative whole-status budget: actual diagnostic and GPIO serializers
-  // plus 1,400 bytes reserved for the remaining camera/MQTT fields.
+  // plus 1,900 bytes reserved for camera/MQTT/CSI pilot fields.
   j=cJSON_CreateObject();doorbellDiagnosticsStatus(j);
   doorbellMemoryStatus(at(at(j,"diagnostics"),"memory"));
-  std::string base(1400,'x');cJSON_AddStringToObject(j,"base_status_budget",base.c_str());
+  std::string base(1900,'x');cJSON_AddStringToObject(j,"base_status_budget",base.c_str());
   auto *levels=cJSON_AddObjectToObject(j,"sensor_levels");
   DoorbellLevel::Snapshot level;level.initialized=level.high=level.completedHigh=level.completedLow=true;
   level.highPeriods=level.lowPeriods=level.lastHighMs=level.lastLowMs=UINT32_MAX;

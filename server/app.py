@@ -24,6 +24,7 @@ from server.faces import (FaceStore, MATCH_THRESHOLD, MAX_SAMPLES_PER_PERSON, BU
                           BURST_DUPLICATE_THRESHOLD, OpenCVEngine, normalized, prepare_photo, validate_name)
 from server.mqtt_bridge import MQTTBridge
 from server.lighting import AutomaticLight, frame_brightness
+from server.csi import CSIPilot
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -107,6 +108,9 @@ class CameraHub:
             self.db.execute("ALTER TABLE events ADD COLUMN phase TEXT")
             self.db.commit()
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(4, connect=2), transport=transport, trust_env=False)
+        self.csi = CSIPilot(self.data_dir)
+        self.csi_lock = asyncio.Lock()
+        self.csi_task = None
         self.poll_interval = poll_interval
         self.status = None
         self.online = False
@@ -360,7 +364,7 @@ class CameraHub:
                 "receiving": self.producer is not None and self.frame is not None and time.monotonic() - self.last_frame_at < 5,
                 "error": self.stream_error}, "events_lost": self.events_lost,
                 "mqtt": self.mqtt.status(), "control_transport": "mqtt" if self.mqtt.ready() else "http",
-                "sensor_activity": self.sensor_activity(), "camera_controls": {
+                "sensor_activity": self.sensor_activity(), "csi": self.csi.status(), "camera_controls": {
                     "night_mode": self.settings.night_mode, "light_mode": "auto",
                     "light_percent": 50 if self.light.enabled else 0,
                     "brightness": self.light.brightness,
@@ -503,6 +507,7 @@ class CameraHub:
         async with self.control_lock:
             camera_changed = settings.camera_url != self.settings.camera_url
             if camera_changed:
+                self.csi.deactivate("Camera address changed. Start a new pilot session.")
                 await self.stop_producer()
             self.settings = settings
             self.config_generation += 1
@@ -522,7 +527,72 @@ class CameraHub:
                     self.producer = asyncio.create_task(self.produce())
             self.changed.set()
 
+    async def maintain_csi(self):
+        while True:
+            state = self.status or {}
+            diagnostics = state.get("diagnostics", {})
+            memory = diagnostics.get("memory", {})
+            self.csi.context = {"video_receiving": self.producer is not None and self.frame is not None and time.monotonic() - self.last_frame_at < 5,
+                "mqtt_online": self.mqtt.ready(), "firmware": state.get("firmware_version"),
+                "internal_free_bytes": memory.get("internal_free_bytes"),
+                "internal_min_free_bytes": memory.get("internal_min_free_bytes"),
+                "stream_errors": diagnostics.get("camera", {}).get("stream_errors"),
+                "wifi_disconnects": diagnostics.get("wifi", {}).get("disconnects"),
+                "queue_drops": state.get("csi_pilot", {}).get("queue_drops"),
+                "send_errors": state.get("csi_pilot", {}).get("send_errors")}
+            if self.csi.enabled:
+                if not self.online or state.get("boot_id") != self.csi.boot or not state.get("csi_pilot", {}).get("enabled"):
+                    self.csi.deactivate(state.get("csi_pilot", {}).get("reason", "Camera stopped or reconnected.") + " Start a new pilot session and calibrate again.")
+            self.csi.flush()
+            await asyncio.sleep(1)
+
+    async def configure_csi(self, enabled):
+        async with self.csi_lock:
+            if not enabled:
+                self.csi.deactivate()
+            if enabled and (not self.online or not (self.status or {}).get("csi_pilot", {}).get("supported")):
+                raise HTTPException(409, "Upload csi-pilot-1 to the ESP32, connect it, then start the pilot.")
+            if enabled and self.csi.port is None:
+                raise HTTPException(503, self.csi.error or "CSI receiver is unavailable.")
+            base = self.settings.camera_url
+            host = urlsplit(base).hostname
+            local = None
+            if enabled:
+                # Route lookup only: connect on a UDP socket sends no packet.
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+                    route.connect((host, 80))
+                    local = route.getsockname()[0]
+            try:
+                response = await self.client.post(base + "/api/csi/config", json={
+                    "enabled": enabled, "host": local or "", "port": self.csi.port or 5005}, headers={"Connection": "close"})
+                response.raise_for_status()
+                state = response.json()
+                if not isinstance(state, dict) or not state.get("boot_id") or state.get("csi_pilot", {}).get("enabled") is not enabled:
+                    raise ValueError("CSI configuration was not confirmed")
+                if base != self.settings.camera_url:
+                    raise ValueError("Camera changed while configuring CSI")
+                self.status = state
+                self.online = True
+                self.mark_seen()
+                if enabled:
+                    seed = state["csi_pilot"]["sequence_start"]
+                    if not isinstance(seed, int) or not 0 <= seed <= 0xffffffff:
+                        raise ValueError("Invalid CSI session")
+                    self.csi.activate(host, state["boot_id"], seed)
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, OSError) as exc:
+                raise HTTPException(502, "CSI settings were not confirmed by the ESP32. Check the connection and firmware.") from exc
+            self.changed.set()
+            return self.csi.status()
+
     async def close(self):
+        if self.csi_task:
+            self.csi_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.csi_task
+        if self.csi.enabled:
+            with suppress(httpx.HTTPError):
+                await self.client.post(self.settings.camera_url + "/api/csi/config", json={"enabled": False}, timeout=1)
+        self.csi.close()
         if self.camera_controls_task:
             self.camera_controls_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -542,11 +612,13 @@ class CameraHub:
         self.faces.close()
 
 
-def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None):
+def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None, csi_port=None):
     @asynccontextmanager
     async def lifespan(app):
         hub = CameraHub(data_dir or os.environ.get("DOORBELL_DATA_DIR", ROOT / ".local-data"), transport, poll_interval, face_engine)
         app.state.hub = hub
+        await hub.csi.listen(csi_port if csi_port is not None else (0 if transport is not None else int(os.environ.get("DOORBELL_CSI_PORT", "5005"))))
+        hub.csi_task = asyncio.create_task(hub.maintain_csi())
         await hub.mqtt.start()
         hub.poller = asyncio.create_task(hub.poll())
         hub.face_task = asyncio.create_task(hub.recognize_faces())
@@ -605,6 +677,32 @@ def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None)
                 except TimeoutError:
                     pass
         return StreamingResponse(messages(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+
+    @app.get("/api/csi")
+    async def csi_status(request: Request):
+        return request.app.state.hub.csi.status()
+
+    @app.post("/api/csi/{action}")
+    async def csi_action(action: str, request: Request):
+        hub = request.app.state.hub
+        if action in ("start", "stop"):
+            return await hub.configure_csi(action == "start")
+        try:
+            if action == "calibrate": hub.csi.calibrate()
+            elif action in ("record-empty", "record-walking"): hub.csi.begin_trial(action.removeprefix("record-"))
+            else: raise HTTPException(404, "Unknown CSI action")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        hub.changed.set()
+        return hub.csi.status()
+
+    @app.get("/api/csi/recordings/{identifier}")
+    async def csi_recording(identifier: str, request: Request):
+        if len(identifier) != 32 or any(c not in "0123456789abcdef" for c in identifier):
+            raise HTTPException(404, "Recording not found")
+        path = request.app.state.hub.csi.directory / f"{identifier}.csv"
+        if not path.is_file(): raise HTTPException(404, "Recording not found")
+        return FileResponse(path, media_type="text/csv", filename=f"csi-{identifier}.csv")
 
     @app.get("/api/events")
     async def events(request: Request):

@@ -64,6 +64,7 @@ function render() {
   text('lighting-status', `Auto light · ${lighting?.brightness == null ? 'Checking light levels' : lighting?.light_percent ? '50% in low light' : 'Off — enough light'} · Night mode ${lighting?.night_mode ? 'on' : 'off'}${lighting?.applied ? '' : ' · Waiting for camera'}`);
   paintFaceOverlay();
   renderSensorTiming();
+  renderCsi();
   const online = Boolean(state?.online), c = state?.camera || {};
   $('connection').className = 'connection ' + (online ? 'online' : 'offline');
   text('connection-label', online ? 'Camera connected' : 'Camera offline');
@@ -384,6 +385,59 @@ $('face-monitoring').addEventListener('change', async event => {
 async function pollFaces() { if (!updatesConnected) await refreshFaces(); setTimeout(pollFaces, 3000); }
 pollFaces();
 
+let csiBusy = false;
+function renderCsi() {
+  const pilot = state?.csi || {}, camera = state?.camera || {};
+  const titles = {stopped:'Stopped', no_data:'No data', low_rate:'Low packet rate', calibrating:'Calibrating', uncalibrated:'Uncalibrated', waiting:'Collecting', elevated:'Elevated signal', quiet:'Quiet signal'};
+  text('csi-state', titles[pilot.state] || 'No data');
+  const supported = Boolean(camera.csi_pilot?.supported);
+  $('csi-start').disabled = csiBusy || !state?.online || !supported || Boolean(pilot.enabled);
+  $('csi-stop').disabled = csiBusy || (!pilot.enabled && !camera.csi_pilot?.enabled);
+  $('csi-calibrate').disabled = csiBusy || !pilot.enabled || pilot.rate_hz < 5 || pilot.state === 'calibrating';
+  $('csi-empty').disabled = $('csi-walking').disabled = csiBusy || !pilot.enabled || pilot.rate_hz < 5 || Boolean(pilot.trial);
+  const info = !supported ? 'Upload csi-pilot-1 to enable the CSI pilot.' : !state?.online ? 'Camera offline. Reconnect it before starting.' : pilot.error || pilot.calibration_error || (pilot.state === 'calibrating' ? `Keep the room empty · ${pilot.calibration_remaining_s}s remaining.` : pilot.state === 'uncalibrated' ? 'Live packets are arriving. Leave the room, then calibrate for 60 seconds.' : pilot.state === 'low_rate' ? 'Need at least 5 packets/s for analysis. Check the radio link and router responses.' : pilot.state === 'no_data' ? 'No fresh CSI packets. Check the pilot, UDP port 5005 and camera connection.' : pilot.enabled ? 'Live CSI signal changes · 20 Hz capture target · automatic stop after 10 minutes.' : pilot.reason || 'Ready to start.');
+  text('csi-help', info);
+  text('csi-rate', pilot.enabled ? `${pilot.rate_hz || 0} Hz` : '—');
+  text('csi-rssi', pilot.rssi != null ? `${pilot.rssi} dBm` : '—');
+  text('csi-gaps', pilot.enabled ? String(pilot.sequence_gaps || 0) : '—');
+  text('csi-threshold', pilot.threshold != null ? pilot.threshold.toFixed(4) : '—');
+  const memory = camera.diagnostics?.memory || {}, diagnostics = camera.diagnostics?.camera || {};
+  text('csi-heap', memory.internal_min_free_bytes != null ? `${memory.internal_min_free_bytes} B` : '—');
+  text('csi-stream-errors', diagnostics.stream_errors != null ? String(diagnostics.stream_errors) : '—');
+  const history = pilot.history || [], scores = history.filter(p => p.score != null).map(p => p.score);
+  const ceiling = Math.max(.03, (pilot.threshold || 0) * 1.4, ...scores.map(s => s * 1.15));
+  let path = '', pen = false;
+  history.forEach((point,index) => {
+    if (point.score == null) { pen = false; return; }
+    const x = 10 + (59 - history.length + 1 + index) / 59 * 580, y = 110 - point.score / ceiling * 100;
+    path += `${pen ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)} `; pen = true;
+  });
+  $('csi-line').setAttribute('d', path);
+  const y = 110 - (pilot.threshold || 0) / ceiling * 100;
+  $('csi-threshold-line').setAttribute('d', pilot.threshold != null ? `M10,${y} L590,${y}` : '');
+  $('csi-plot-empty').hidden = Boolean(scores.length);
+  const comparison = pilot.comparison;
+  $('csi-comparison').hidden = !comparison;
+  if (comparison) text('csi-comparison', `Recent trials with video ${comparison.video_running ? 'running' : 'stopped'} · Empty ${comparison.empty_mean.toFixed(4)} · Walking ${comparison.walking_mean.toFixed(4)}${comparison.ratio != null ? ' · ' + comparison.ratio.toFixed(1) + '× change' : ''}. One comparison does not establish detection accuracy or range.`);
+  text('csi-trial-progress', pilot.trial ? `Recording ${pilot.trial.label} · ${pilot.trial.remaining_s}s remaining` : '');
+  $('csi-recordings').replaceChildren(...(pilot.runs || []).map(run => {
+    const row = document.createElement('li'), link = document.createElement('a');
+    link.href = `/api/csi/recordings/${encodeURIComponent(run.id)}`;
+    link.textContent = `${run.label === 'empty' ? 'Empty room' : 'Walking'} · ${run.valid_windows} valid windows${run.completed ? '' : ' · interrupted'} · CSV`;
+    row.append(link); return row;
+  }));
+}
+for (const [id,action] of [['csi-start','start'],['csi-stop','stop'],['csi-calibrate','calibrate'],['csi-empty','record-empty'],['csi-walking','record-walking']]) {
+  $(id).addEventListener('click', async () => {
+    csiBusy = true; renderCsi();
+    try {
+      await api('/api/csi/' + action, {method:'POST'});
+      state = await api('/api/status'); render();
+    } catch(error) { toast(error.message); }
+    finally { csiBusy = false; renderCsi(); }
+  });
+}
+
 let burstFiles = [], burstUrls = [], burstAnchor = '', burstEpoch = 0, burstBusy = false, burstController = null;
 function clearBurst() {
   burstEpoch += 1; burstController?.abort(); burstController = null;
@@ -541,129 +595,6 @@ $('upload-form').addEventListener('submit', async event => {
     $('upload-submit').disabled = !$('upload-files').files.length;
   }
 });
-
-let testPreviewUrl = null, testBusy = false, selectedTestPhoto = null;
-let deviceStream = null, cameraTimer = null, cameraEpoch = 0, cameraAbort = null;
-function stopDeviceCamera(message = '') {
-  cameraEpoch += 1; clearTimeout(cameraTimer); cameraAbort?.abort(); cameraAbort = null;
-  deviceStream?.getTracks().forEach(track => track.stop()); deviceStream = null;
-  $('device-camera-video').srcObject = null; $('device-camera-video').hidden = true;
-  $('device-camera-start').disabled = false; $('device-camera-stop').disabled = true; $('device-camera-facing').disabled = false;
-  if (message) { text('test-message', message); $('test-message').hidden = false; }
-}
-$('recognition-tools').addEventListener('toggle', event => {
-  // Also invalidate an outstanding permission request before it can open video.
-  if (!event.target.open) stopDeviceCamera(deviceStream ? 'Device camera stopped.' : '');
-});
-function chooseTestPhoto(file) {
-  stopDeviceCamera(); selectedTestPhoto = file || null;
-  if (testPreviewUrl) URL.revokeObjectURL(testPreviewUrl);
-  testPreviewUrl = null; $('test-preview').hidden = true;
-  $('test-results').replaceChildren(); $('test-message').hidden = true; $('test-score-help').hidden = true;
-  $('test-submit').disabled = !file;
-  if (!file) return;
-  if (file.size > 8 * 1024 * 1024) {
-    text('test-message', 'Choose a photo smaller than 8 MB.'); $('test-message').hidden = false;
-    $('test-submit').disabled = true; return;
-  }
-  testPreviewUrl = URL.createObjectURL(file); $('test-preview').src = testPreviewUrl; $('test-preview').hidden = false;
-}
-$('test-file').addEventListener('change', event => chooseTestPhoto(event.target.files[0]));
-$('test-camera-photo').addEventListener('change', event => {
-  $('test-file').value = ''; chooseTestPhoto(event.target.files[0]);
-});
-async function sendRecognitionTest(file, signal = AbortSignal.timeout(60000)) {
-  const form = new FormData(); form.append('file', file, file.name || 'device-camera.jpg');
-  const response = await fetch('/api/faces/test', {method:'POST', body:form, signal});
-  const result = await response.json();
-  if (!response.ok) throw Error(typeof result.detail === 'string' ? result.detail : 'This photo could not be tested. Try a clearer image.');
-  return result;
-}
-function renderTestResults(result, live = false) {
-  $('test-message').hidden = false; $('test-message').classList.remove('error');
-  const prefix = live ? `Live check ${new Date().toLocaleTimeString()} · ` : '';
-  text('test-message', prefix + (result.faces.length ? `${result.faces.length} face${result.faces.length === 1 ? '' : 's'} checked${result.low_quality_faces ? ` · ${result.low_quality_faces} small or blurry face(s) skipped` : ''}. Nothing was saved.` : 'No usable faces found. Move closer or improve lighting. Nothing was saved.'));
-  $('test-results').replaceChildren(...result.faces.map(face => {
-    const card = document.createElement('article'); card.className = 'test-result ' + (face.matched ? 'matched' : 'unmatched');
-    const image = document.createElement('img'); image.src = face.image_data_url; image.alt = 'Face found in your test image';
-    const info = document.createElement('div');
-    const name = document.createElement('h4'); name.textContent = face.matched ? face.name : 'Unknown';
-    const label = document.createElement('p'); label.textContent = face.matched ? 'Matched a saved profile' : 'No confident profile match';
-    const score = document.createElement('p'); score.className = 'test-score'; score.textContent = typeof face.similarity === 'number' ? `Similarity ${face.similarity.toFixed(3)} · threshold ${result.match_threshold.toFixed(2)}` : 'No saved profiles to compare';
-    info.append(name, label, score); card.append(image, info); return card;
-  }));
-  $('test-score-help').hidden = !result.faces.length;
-}
-$('test-form').addEventListener('submit', async event => {
-  event.preventDefault(); if (testBusy) return;
-  const file = selectedTestPhoto; if (!file || file.size > 8 * 1024 * 1024) return;
-  stopDeviceCamera(); testBusy = true; $('test-submit').disabled = true; $('test-file').disabled = true; $('test-camera-photo').disabled = true; $('device-camera-start').disabled = true;
-  $('test-results').replaceChildren(); $('test-score-help').hidden = true;
-  $('test-message').hidden = false; $('test-message').classList.remove('error'); text('test-message', 'Checking the photo against your saved profiles…');
-  try {
-    renderTestResults(await sendRecognitionTest(file));
-  } catch(error) {
-    $('test-message').classList.add('error'); text('test-message', error.name === 'TimeoutError' ? 'Test timed out. Please try again.' : error.message);
-  } finally { testBusy = false; $('test-submit').disabled = false; $('test-file').disabled = false; $('test-camera-photo').disabled = false; $('device-camera-start').disabled = false; }
-});
-
-const localCameraUrl = `http://localhost:${location.port || '8000'}/#faces`;
-$('camera-local-link').href = localCameraUrl;
-if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) $('device-camera-requirement').hidden = false;
-async function checkDeviceFrame(epoch) {
-  if (epoch !== cameraEpoch || !deviceStream || document.hidden) return;
-  try {
-    const video = $('device-camera-video');
-    if (!video.videoWidth || video.readyState < 2) {
-      cameraTimer = setTimeout(() => checkDeviceFrame(epoch), 500); return;
-    }
-    const canvas = document.createElement('canvas');
-    const scale = Math.min(1, 640 / video.videoWidth, 640 / video.videoHeight);
-    canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale);
-    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', .9));
-    if (epoch !== cameraEpoch || !blob) return;
-    cameraAbort = new AbortController();
-    const timeout = setTimeout(() => cameraAbort?.abort(), 15000);
-    try {
-      const result = await sendRecognitionTest(blob, cameraAbort.signal);
-      if (epoch === cameraEpoch) renderTestResults(result, true);
-    } finally { clearTimeout(timeout); }
-  } catch(error) {
-    if (epoch === cameraEpoch) {
-      $('test-message').hidden = false; $('test-message').classList.add('error');
-      text('test-message', error.name === 'AbortError' ? 'Live check timed out. Retrying…' : error.message);
-    }
-  }
-  if (epoch === cameraEpoch && deviceStream) cameraTimer = setTimeout(() => checkDeviceFrame(epoch), 2000);
-}
-$('device-camera-start').addEventListener('click', async () => {
-  if (testBusy || deviceStream) return;
-  $('test-message').classList.remove('error'); $('test-message').hidden = false;
-  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
-    $('device-camera-requirement').hidden = false;
-    text('test-message', 'This browser requires HTTPS for live camera access. Use localhost on the laptop, or Take photo on your phone.'); return;
-  }
-  const epoch = ++cameraEpoch;
-  $('device-camera-start').disabled = true; $('device-camera-stop').disabled = false; $('device-camera-facing').disabled = true;
-  text('test-message', 'Allow camera access in your browser to begin.');
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({audio:false, video:{facingMode:{ideal:$('device-camera-facing').value}, width:{ideal:640}, height:{ideal:480}, frameRate:{ideal:15,max:24}}});
-    if (epoch !== cameraEpoch) { stream.getTracks().forEach(track => track.stop()); return; }
-    deviceStream = stream;
-    stream.getTracks().forEach(track => track.addEventListener('ended', () => { if (epoch === cameraEpoch) stopDeviceCamera('Device camera stopped.'); }));
-    $('device-camera-video').srcObject = stream; $('device-camera-video').hidden = false; $('test-preview').hidden = true;
-    await $('device-camera-video').play();
-    if (epoch === cameraEpoch) checkDeviceFrame(epoch);
-  } catch(error) {
-    if (epoch !== cameraEpoch) return;
-    stopDeviceCamera(); $('test-message').hidden = false; $('test-message').classList.add('error');
-    text('test-message', error.name === 'NotAllowedError' ? 'Camera permission was denied. Allow camera access in browser settings, or upload a photo.' : error.name === 'NotFoundError' ? 'No camera was found on this device. You can upload a photo instead.' : 'Could not open this device’s camera. Check that it is available and not in use by another app.');
-  }
-});
-$('device-camera-stop').addEventListener('click', () => stopDeviceCamera('Device camera stopped. Test frames were not saved.'));
-document.addEventListener('visibilitychange', () => { if (document.hidden && deviceStream) stopDeviceCamera('Device camera stopped while the page was hidden.'); });
-window.addEventListener('pagehide', () => stopDeviceCamera());
 
 if (window.EventSource) {
   const updates = new EventSource('/api/updates');

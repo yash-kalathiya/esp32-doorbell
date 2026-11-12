@@ -53,12 +53,6 @@ async def main():
                 "sound": {"level": 1, "active_level": 0, "level_for_ms": uptime - 65000,
                           "trigger_count": 0, "active_event_id": 0, "last_low_ms": 8}}})
     with tempfile.TemporaryDirectory(prefix="doorbell-face-qa-") as data:
-        import cv2
-        frame = cv2.imread(str(fixture))
-        frame = cv2.resize(frame, (512, 512))
-        yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420).tobytes()
-        fake_video = Path(data) / "sample-camera.y4m"
-        fake_video.write_bytes(b"YUV4MPEG2 W512 H512 F10:1 Ip A1:1 C420\n" + (b"FRAME\n" + yuv) * 10)
         app = create_app(data, httpx.MockTransport(camera))
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
@@ -71,10 +65,7 @@ async def main():
                     await asyncio.sleep(.02)
             base = f"http://127.0.0.1:{port}"
             async with async_playwright() as p:
-                browser = await p.chromium.launch(executable_path="/usr/bin/google-chrome", headless=True, args=[
-                    "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream",
-                    f"--use-file-for-fake-video-capture={fake_video}",
-                    "--host-resolver-rules=MAP insecure-camera.test 127.0.0.1", "--no-proxy-server"])
+                browser = await p.chromium.launch(executable_path="/usr/bin/google-chrome", headless=True)
                 try:
                     page = await browser.new_page(viewport={"width": 1440, "height": 1100})
                     errors = []
@@ -163,13 +154,7 @@ async def main():
                     page.once('dialog', lambda dialog: dialog.accept())
                     await page.get_by_role('button', name='Remove QA Sample', exact=True).click()
                     await expect(page.locator('.person-card')).to_have_count(0)
-                    # Test a face without saving an unknown capture or profile.
-                    await page.locator('#recognition-tools > summary').click()
-                    await page.locator('#test-file').set_input_files(str(fixture))
-                    await page.get_by_role('button', name='Run test', exact=True).click()
-                    await expect(page.locator('.test-result h4')).to_have_text('Unknown')
-                    await expect(page.locator('.person-card')).to_have_count(0)
-                    await expect(page.locator('.unknown-card')).to_have_count(0)
+                    await expect(page.locator('#recognition-tools')).to_have_count(0)
                     # Upload real photos into the isolated gallery, then test matching.
                     await page.get_by_role('button', name='Upload photos', exact=True).click()
                     await page.locator('#upload-name').fill('Uploaded QA')
@@ -179,20 +164,7 @@ async def main():
                     await page.get_by_role('button', name='Close photo upload', exact=True).click()
                     await expect(page.locator('.person-card h4')).to_have_text('Uploaded QA')
                     await expect(page.locator('.person-description p')).to_have_text('2 saved samples')
-                    await page.get_by_role('button', name='Run test', exact=True).click()
-                    await expect(page.locator('.test-result h4')).to_have_text('Uploaded QA')
-                    # Device webcam path uses a labelled synthetic camera, never physical hardware.
-                    await page.get_by_role('button', name='Use device camera', exact=True).click()
-                    await expect(page.locator('#device-camera-video')).to_be_visible()
-                    await expect(page.locator('#test-message')).to_contain_text('Live check', timeout=15000)
-                    await expect(page.locator('.test-result h4')).to_have_text('Uploaded QA')
-                    await page.evaluate('window.qaTracks = document.getElementById("device-camera-video").srcObject.getTracks()')
-                    await page.locator('#recognition-tools > summary').click()
-                    await page.wait_for_function('window.qaTracks.every(track => track.readyState === "ended")')
-                    await page.locator('#recognition-tools > summary').click()
-                    await expect(page.locator('#device-camera-video')).to_be_hidden()
-                    assert await page.evaluate('window.qaTracks.every(track => track.readyState === "ended")')
-                    await page.screenshot(path=str(ROOT / 'artifacts/face-upload-test-mobile.png'), full_page=True)
+                    await page.screenshot(path=str(ROOT / 'artifacts/face-upload-mobile.png'), full_page=True)
                     # Existing-person shortcut and precise rejection message.
                     await page.get_by_role('button', name='Add photos for Uploaded QA', exact=True).click()
                     await expect(page.locator('#upload-name')).to_have_value('Uploaded QA')
@@ -201,22 +173,13 @@ async def main():
                     await expect(page.locator('#upload-message')).to_contain_text('could not be read')
                     await expect(page.locator('#upload-results')).to_be_visible()
                     await page.get_by_role('button', name='Close photo upload', exact=True).click()
-                    # An insecure LAN-style HTTP origin must show the HTTPS requirement.
-                    insecure = await browser.new_page(viewport={"width":390,"height":844})
-                    await insecure.goto(f'http://insecure-camera.test:{port}/#faces')
-                    await insecure.locator('#recognition-tools > summary').click()
-                    await expect(insecure.locator('#device-camera-requirement')).to_be_visible()
-                    await insecure.get_by_role('button', name='Use device camera', exact=True).click()
-                    await expect(insecure.locator('#test-message')).to_contain_text('requires HTTPS')
-                    assert await insecure.locator('#test-camera-photo').get_attribute('capture') == 'user'
-                    await insecure.close()
                     assert not errors, errors
                     print(json.dumps({"isolated_real_model_test": "passed", "unknown_thumbnail": True,
                         "name_preserved_during_refresh": True, "enrollment": True,
                         "subsequent_sample_recognized": True, "mobile_layout": True,
                         "pause_and_delete": True, "real_model_photo_upload": True, "sse_event_updates": True,
-                        "read_only_recognition_test": True, "fake_device_camera_matching_and_stop": True,
-                        "insecure_origin_help": True, "precise_upload_errors": True,
+                        "presentation_test_panel_removed": True,
+                        "precise_upload_errors": True,
                         "live_unknown_and_name_overlays": True, "desktop_mobile_overlay_alignment": True,
                         "sensor_durations_and_retrigger_count": True, "overlay_clears_when_paused": True, "night_mode_toggle_confirmed": True, "esp32_burst_review_and_duplicate_filter": True, "bright_image_keeps_light_off": True,
                         "javascript_errors": errors}))

@@ -60,6 +60,7 @@ class CSIPilot(asyncio.DatagramProtocol):
                     pass
         self.trial = None
         self.calibration = None
+        self.calibration_id = None
         self.threshold = None
         self.clear_threshold = None
         self.calibration_error = None
@@ -100,6 +101,7 @@ class CSIPilot(asyncio.DatagramProtocol):
         self.reason = reason
         self.last_frame = self.previous = self.signature = None
         self.motion = self.threshold = self.clear_threshold = self.calibration = None
+        self.calibration_id = None
         self.calibration_error = None
         self.high_windows = self.low_windows = 0
         self.times.clear(); self.window.clear(); self.history.clear()
@@ -129,7 +131,9 @@ class CSIPilot(asyncio.DatagramProtocol):
         else:
             self.gaps += offset
         if self.signature is not None and frame['signature'] != self.signature:
+            self.finish_trial(False)
             self.threshold = self.clear_threshold = self.calibration = None
+            self.calibration_id = None
             self.calibration_error = 'Radio channel or frame geometry changed. Calibrate again.'
             self.previous = None
             self.window.clear()
@@ -152,11 +156,14 @@ class CSIPilot(asyncio.DatagramProtocol):
         return len(recent) / span
 
     def calibrate(self):
+        if self.trial:
+            raise ValueError('Finish the current recording before recalibrating.')
         if not self.fresh() or self.rate() < MIN_HZ:
             raise ValueError('Need fresh CSI at 5 packets/s or more before calibration.')
         self.threshold = self.clear_threshold = None
         self.calibration_error = None
         self.calibration = {'until': self.clock() + 60, 'scores': []}
+        self.calibration_id = uuid.uuid4().hex
         self.window.clear(); self.window_started = self.clock(); self.window_gap = False
         self.previous = None
         self.motion = None; self.high_windows = self.low_windows = 0
@@ -179,6 +186,7 @@ class CSIPilot(asyncio.DatagramProtocol):
             scores = self.calibration['scores']
             self.calibration = None
             if len(scores) < 40:
+                self.calibration_id = None
                 self.calibration_error = 'Too few valid windows. Check packet rate and repeat empty-room calibration.'
             else:
                 baseline = float(np.median(scores))
@@ -210,6 +218,7 @@ class CSIPilot(asyncio.DatagramProtocol):
         if label not in ('empty', 'walking'):
             raise ValueError('Choose empty or walking.')
         if not self.fresh(): raise ValueError('No fresh CSI is arriving.')
+        if self.calibration: raise ValueError('Finish calibration before starting a recording.')
         if self.trial: raise ValueError('A recording is already running.')
         self.directory.mkdir(parents=True, exist_ok=True)
         if sum(1 for _ in self.directory.glob('*.csv')) >= 100:
@@ -223,7 +232,9 @@ class CSIPilot(asyncio.DatagramProtocol):
                          'sequence_gaps', 'threshold', 'elevated_signal', 'video_receiving', 'mqtt_online', 'internal_free_bytes',
                          'internal_min_free_bytes', 'stream_errors', 'wifi_disconnects', 'queue_drops', 'send_errors'])
         self.trial = {'id': identifier, 'label': label, 'until': self.clock()+30,
-                      'file': handle, 'writer': writer, 'scores': [], 'context': dict(self.context)}
+                      'file': handle, 'writer': writer, 'scores': [], 'context': dict(self.context),
+                      'calibration_id': self.calibration_id, 'session_seed': getattr(self, 'seed', None),
+                      'boot_id': getattr(self, 'boot', None), 'radio_geometry': self.signature}
 
     def finish_trial(self, completed):
         if not self.trial: return
@@ -231,7 +242,8 @@ class CSIPilot(asyncio.DatagramProtocol):
         trial['file'].close()
         scores = trial['scores']
         summary = {'id': trial['id'], 'label': trial['label'], 'completed': completed,
-                   'boot_id': getattr(self, 'boot', None), 'radio_geometry': self.signature,
+                   'boot_id': trial['boot_id'], 'radio_geometry': trial['radio_geometry'],
+                   'calibration_id': trial['calibration_id'], 'session_seed': trial['session_seed'],
                    'context_start': trial['context'], 'context_end': dict(self.context),
                    'valid_windows': len(scores), 'mean_change': float(np.mean(scores)) if scores else None}
         self.add_video_modes(summary)
@@ -247,13 +259,20 @@ class CSIPilot(asyncio.DatagramProtocol):
             summary['video_modes'] = []
 
     def comparison(self):
-        walking = [r for r in self.runs if r['label'] == 'walking' and r['completed'] and r['valid_windows'] >= 20]
-        empty = [r for r in self.runs if r['label'] == 'empty' and r['completed'] and r['valid_windows'] >= 20]
+        if not self.runs: return None
+        newest = self.runs[0]
+        def scope(run):
+            return run.get('boot_id'), run.get('session_seed'), run.get('calibration_id')
+        eligible = [r for r in self.runs if scope(r) == scope(newest) and not r.get('exclude_reason')]
+        walking = [r for r in eligible if r['label'] == 'walking' and r['completed'] and r['valid_windows'] >= 20]
+        empty = [r for r in eligible if r['label'] == 'empty' and r['completed'] and r['valid_windows'] >= 20]
         for walk in walking:
             for quiet in empty:
                 modes = walk.get('video_modes', [])
                 if (len(modes) != 1 or modes[0] not in ('True', 'False') or modes != quiet.get('video_modes')
-                    or walk.get('boot_id') != quiet.get('boot_id') or walk.get('radio_geometry') != quiet.get('radio_geometry')):
+                    or walk.get('boot_id') != quiet.get('boot_id') or walk.get('radio_geometry') != quiet.get('radio_geometry')
+                    or walk.get('session_seed') != quiet.get('session_seed')
+                    or walk.get('calibration_id') != quiet.get('calibration_id')):
                     continue
                 low, high = quiet['mean_change'], walk['mean_change']
                 if low is None or high is None: continue
@@ -276,6 +295,7 @@ class CSIPilot(asyncio.DatagramProtocol):
                 'rssi': self.rssi if fresh else None, 'threshold': self.threshold, 'clear_threshold': self.clear_threshold,
                 'comparison': self.comparison(),
                 'calibration_error': self.calibration_error,
+                'calibration_id': self.calibration_id,
                 'calibration_remaining_s': max(0, int(self.calibration['until']-self.clock())) if self.calibration else None,
                 'history': list(self.history), 'runs': list(self.runs),
                 'trial': {'label': self.trial['label'], 'remaining_s': max(0, int(self.trial['until']-self.clock()))} if self.trial else None}

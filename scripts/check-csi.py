@@ -52,6 +52,9 @@ async def main():
             async with asyncio.timeout(10):
                 while not server.started: await asyncio.sleep(.02)
             pilot = app.state.hub.csi; pilot.clock = clock
+            # This isolated UI check skips the real exit delay; its timing is
+            # covered with a controlled clock in tests/test_security.py.
+            app.state.hub.security.exit_seconds = 0
             async def send():
                 sequence = 0
                 while not done:
@@ -80,10 +83,15 @@ async def main():
                 await page.locator('.pilot-details > summary').click()
                 await page.locator('#csi-empty').click()
                 await expect(page.locator('#csi-recordings a')).to_have_count(1, timeout=15000)
+                await page.locator('#security-arm').click()
+                await expect(page.locator('#security-state')).to_have_text('Armed away', timeout=10000)
                 moving = True
                 await expect(page.locator('#csi-state')).to_have_text('Elevated signal', timeout=10000)
                 await page.locator('#csi-walking').click()
                 await expect(page.locator('#csi-recordings a')).to_have_count(2, timeout=15000)
+                await expect(page.locator('#security-incidents strong')).to_have_count(1, timeout=15000)
+                await page.get_by_role('button', name='Acknowledge', exact=True).click()
+                await expect(page.locator('#security-incidents')).to_contain_text('Acknowledged', timeout=10000)
                 assert pilot.runs[0]['mean_change'] > pilot.runs[1]['mean_change']
                 async with httpx.AsyncClient() as client:
                     response = await client.get(base + '/api/csi/recordings/' + pilot.runs[0]['id'])
@@ -94,12 +102,16 @@ async def main():
                 assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 dropping = True
                 await expect(page.locator('#csi-state')).to_have_text('No data', timeout=10000)
+                await expect(page.locator('#security-state')).to_have_text('Unavailable', timeout=10000)
                 await expect(page.locator('#csi-calibrate')).to_be_disabled()
+                await page.locator('#security-disarm').click()
+                await expect(page.locator('#security-state')).to_have_text('Disarmed', timeout=10000)
                 await page.locator('#csi-stop').click()
                 await expect(page.locator('#csi-state')).to_have_text('Stopped', timeout=10000)
                 assert not errors, errors
                 print(json.dumps({'synthetic_loopback_udp_ui':'passed', 'calibration':True,
                     'empty_walking_csv':True, 'stale_data_is_unavailable':True,
+                    'experimental_security_arm_incident_ack_and_degraded_state':True,
                     'mobile_layout':True, 'presentation_test_panel_removed':True, 'javascript_errors':errors}))
                 await browser.close()
         finally:

@@ -92,11 +92,71 @@ Measured on the uploaded `reliable-1`, November 12, 2026:
   reseating/power cycling did not resolve prolonged HIGH. Its hardware fault
   remains open, and is reported without falsely clearing motion. The user has
   no multimeter, so the exact sensor/wiring/supply cause has not been measured.
+- A separate 180-second CSI-only observation received 1,248 packets at sampled
+  rates of 6.2–7.6 Hz, with one receiver sequence gap and no rejected packets.
+  MQTT stayed online in one boot, the stream-error counter stayed zero, and
+  sampled free internal heap stayed between 23,444 and 24,404 bytes. Capture
+  never hit its heap guard. This validates short acquisition stability, not
+  human classification or continuous protection.
 
-Software verification: 80 automated tests plus explicit native sensor harnesses
+The physical router-outage check was deferred because the user could not
+interrupt the shared router. Power, broker replay and laptop-service recovery
+were exercised; ESP32 Wi-Fi reassociation during an AP outage remains untested.
+Two newer empty-room recordings each contain 30 valid windows. The following
+two nominal walking recordings were later confirmed to include movement of the
+ESP32 through router distances of 1–2.5 m while people also moved. They are
+preserved but **excluded from human-motion comparison**, because receiver and
+human movement cannot be separated. Furniture and screens present in the room
+are background context, not a completed moving-fan false-positive test. A new
+fixed-device, labelled walking trial and non-human-disturbance testing remain.
+
+Reliability-only verification: 80 automated tests plus explicit native sensor harnesses
 passed. Isolated CSI browser checks, real-model enrollment browser checks and a
-real TLS broker with a simulated device passed. None substitutes for the physical
-network-interruption or repeated labelled CSI trials still in progress.
+real TLS broker with a simulated device passed. These do not substitute for the
+deferred router-outage check or controlled human/disturbance validation.
+
+### Experimental security watch
+
+Under **Wi-Fi → Security watch**, start CSI with video stopped, calibrate an
+empty room, then select **Arm away**. A 15-second exit delay precedes monitoring.
+Five consecutive fresh measurement windows above the calibrated threshold save
+one **possible-intrusion** incident. Three quiet windows rearm the incident rule;
+a 60-second cooldown limits repeated incidents. Missing, low-rate or
+uncalibrated data is **Unavailable**, never evidence that the room is empty.
+The ten-minute CSI lease and memory guard still apply: this is a bounded
+experimental watch, not continuous validated home protection.
+
+Each incident attaches up to three camera observations from the previous two
+minutes, if any, plus device/session and sensor-fault context. Camera observations
+are historical context, not proof of who caused CSI movement. Known faces do not
+automatically authorize later anonymous motion. No person count, room track or
+directional entrance/exit is inferred. A faulty PIR is not used to trigger the
+security rule. No new ESP32 firmware upload is needed for these laptop rules.
+
+Final software checks: **89 automated tests passed**, plus the isolated browser
+check for arm/disarm, incident acknowledgement, missing data and mobile layout.
+The initial rule was replayed offline against the saved mixed-motion recordings,
+but those confounded trials do not validate human or intrusion detection. No
+live armed intrusion demonstration has been completed. Leave this feature
+experimental until fixed-device trials and false-positive checks support it.
+
+Incidents appear locally in the dashboard and can be acknowledged. The latest
+100 are kept in the laptop database, with the latest 20 displayed. They survive
+server restarts, but the watch restarts **disarmed**. Starting video stops CSI,
+so an armed watch becomes unavailable while video is in use. This prototype
+does not send remote notifications, and its laptop server must remain running.
+
+Rule tests use synthetic measurements and isolated galleries/brokers. Browser
+checks cover arming, incidents, acknowledgements and missing-data display. These
+tests establish software behavior, not human-detection accuracy. Recordings made
+while moving the camera/router or changing the room layout must not be used as
+human-motion validation. Recalibrate after moving either radio endpoint. New
+trial comparisons require matching capture session, calibration, boot, radio
+geometry and video mode so different placements are not silently pooled.
+
+API: GET `/api/security`, POST `/api/security/arm`, `/api/security/disarm`,
+and `/api/security/incidents/{id}/acknowledge`. Mutating endpoints use the
+dashboard's existing same-origin checks.
 
 Primary implementation references: [Espressif GPIO interrupt service](https://github.com/espressif/esp-idf/blob/v5.5.2/components/esp_driver_gpio/src/gpio.c),
 [ESP32 PSRAM restrictions](https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32/api-guides/external-ram.html),

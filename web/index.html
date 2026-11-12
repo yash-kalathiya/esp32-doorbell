@@ -47,6 +47,13 @@
     <div class="csi-plot"><svg id="csi-chart" class="csi-chart" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="Recent normalized CSI signal changes"><path id="csi-line"/><path id="csi-threshold-line"/></svg><span id="csi-plot-empty">Waiting for live CSI measurements</span></div>
     <p class="field-help">Signal changes are not proof of a person or theft. Missing data means sensing is unavailable, not that the room is empty.</p>
     <p id="csi-comparison" class="csi-comparison" hidden></p>
+    <div class="security-watch" aria-labelledby="security-title">
+      <div class="sensing-heading"><div><h3 id="security-title">Security watch</h3><p>Experimental · armed-away signal alerts</p></div><span class="tag" id="security-state">Disarmed</span></div>
+      <p class="field-help" id="security-help" role="status">Start CSI and calibrate an empty room before arming.</p>
+      <div class="csi-controls"><button id="security-arm" class="button secondary" disabled>Arm away</button><button id="security-disarm" class="button secondary" disabled>Disarm</button></div>
+      <p class="field-help">Five consecutive elevated measurement windows create one possible-intrusion incident. Recent camera observations are attached as context; CSI cannot identify the person. Video and CSI operate separately. Missing data is shown as unavailable.</p>
+      <ul id="security-incidents" class="security-incidents" aria-label="Security incidents"></ul>
+    </div>
     <details class="pilot-details"><summary>Record a pilot trial</summary><p class="field-help">Keep the router and camera fixed. Calibrate for 60 seconds in an empty room, then record separate 30-second empty-room and walking trials. Keep live video stopped during CSI trials.</p><div class="csi-controls"><button id="csi-empty" class="button secondary" disabled>Record empty room · 30s</button><button id="csi-walking" class="button secondary" disabled>Record walking · 30s</button></div><p id="csi-trial-progress" role="status"></p><ul id="csi-recordings" class="csi-recordings"></ul></details>
   </section>
   <section class="faces-section" id="faces" aria-labelledby="faces-title">

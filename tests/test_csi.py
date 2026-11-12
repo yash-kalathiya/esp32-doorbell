@@ -149,6 +149,52 @@ def test_comparison_requires_matching_video_conditions(tmp_path):
     assert comparison and not comparison['video_running'] and comparison['ratio'] > 1
 
 
+def test_comparison_rejects_different_calibration_and_geometry_interrupts_recording(tmp_path):
+    receiver, clock = pilot(tmp_path)
+    feed(receiver, clock, 2)
+    receiver.context = {'video_receiving': False}
+    receiver.calibrate(); feed(receiver, clock, 61)
+    receiver.begin_trial('empty'); feed(receiver, clock, 31)
+    first = receiver.runs[0]['calibration_id']
+    receiver.calibrate(); feed(receiver, clock, 61)
+    receiver.begin_trial('walking'); feed(receiver, clock, 31, moving=True)
+    assert receiver.runs[0]['calibration_id'] != first
+    assert receiver.comparison() is None
+    receiver.begin_trial('empty'); feed(receiver, clock, 31)
+    assert receiver.comparison() is not None
+    receiver.begin_trial('walking'); feed(receiver, clock, 2, moving=True)
+    clock.value += .05
+    receiver.datagram_received(packet(receiver.sequence+1, frequency=2437), (ADDRESS, 1234))
+    assert receiver.trial is None and not receiver.runs[0]['completed']
+    assert receiver.runs[0]['radio_geometry'][0] == 2412
+
+
+def test_excluded_or_older_session_comparisons_are_not_presented_as_latest(tmp_path):
+    receiver, clock = pilot(tmp_path)
+    feed(receiver, clock, 2)
+    receiver.context = {'video_receiving': False}
+    receiver.begin_trial('empty'); feed(receiver, clock, 31)
+    receiver.begin_trial('walking'); feed(receiver, clock, 31, moving=True)
+    assert receiver.comparison()
+    receiver.runs[0]['exclude_reason'] = 'Receiver moved during the trial.'
+    assert receiver.comparison() is None
+    receiver.runs[0].pop('exclude_reason')
+    receiver.activate(ADDRESS, 'another-boot', 5000); feed(receiver, clock, 2)
+    receiver.begin_trial('empty'); feed(receiver, clock, 31)
+    assert receiver.comparison() is None
+
+
+def test_calibration_and_recording_cannot_overlap(tmp_path):
+    receiver, clock = pilot(tmp_path); feed(receiver, clock, 2)
+    receiver.calibrate()
+    with pytest.raises(ValueError, match='Finish calibration'):
+        receiver.begin_trial('empty')
+    feed(receiver, clock, 61)
+    receiver.begin_trial('empty')
+    with pytest.raises(ValueError, match='current recording'):
+        receiver.calibrate()
+
+
 class NoFaces:
     def detect(self, jpeg): return {'faces': [], 'rejected': 0}
 

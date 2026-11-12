@@ -25,6 +25,7 @@ from server.faces import (FaceStore, MATCH_THRESHOLD, BURST_IDENTITY_THRESHOLD,
 from server.mqtt_bridge import MQTTBridge
 from server.lighting import AutomaticLight, frame_brightness
 from server.csi import CSIPilot
+from server.security import SecurityMonitor
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -108,6 +109,7 @@ class CameraHub:
             self.db.execute("ALTER TABLE events ADD COLUMN phase TEXT")
             self.db.commit()
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(4, connect=2), transport=transport, trust_env=False)
+        self.security = SecurityMonitor(self.db)
         self.csi = CSIPilot(self.data_dir)
         self.csi_lock = asyncio.Lock()
         self.csi_task = None
@@ -376,7 +378,8 @@ class CameraHub:
                 "receiving": self.producer is not None and self.frame is not None and time.monotonic() - self.last_frame_at < 5,
                 "error": self.stream_error}, "events_lost": self.events_lost,
                 "mqtt": self.mqtt.status(), "control_transport": "mqtt" if self.mqtt.ready() else "http",
-                "sensor_activity": self.sensor_activity(), "csi": self.csi.status(), "camera_controls": {
+                "sensor_activity": self.sensor_activity(), "csi": self.csi.status(),
+                "security": self.security.status(self.csi.status(), self.online), "camera_controls": {
                     "night_mode": self.settings.night_mode, "light_mode": "auto",
                     "light_percent": 50 if self.light.enabled else 0,
                     "brightness": self.light.brightness,
@@ -549,6 +552,20 @@ class CameraHub:
                     self.producer = asyncio.create_task(self.produce())
             self.changed.set()
 
+    def security_context(self):
+        # Camera observations provide context only. They neither identify CSI
+        # motion nor prove a directional entrance/exit or authorized occupancy.
+        rows = self.faces.db.execute('''SELECT s.id,p.name,s.last_seen FROM sightings s
+            LEFT JOIN people p ON p.id=s.person_id WHERE s.camera_url=?
+            AND s.last_seen >= ? ORDER BY s.last_seen DESC LIMIT 3''',
+            (self.settings.camera_url, datetime.fromtimestamp(time.time()-120, timezone.utc).isoformat())).fetchall()
+        recent = [{'capture_id':r[0], 'label':r[1] or 'Unknown', 'last_seen':r[2]} for r in rows]
+        return {'device_id': (self.status or {}).get('device_id'),
+                'boot_id': (self.status or {}).get('boot_id'),
+                'radio_geometry': self.csi.signature, 'recent_camera_observations': recent,
+                'sensor_policy': (self.status or {}).get('sensor_policy', {}),
+                'identity_association': 'unknown'}
+
     async def maintain_csi(self):
         while True:
             state = self.status or {}
@@ -566,6 +583,7 @@ class CameraHub:
                 if not self.online or state.get("boot_id") != self.csi.boot or not state.get("csi_pilot", {}).get("enabled"):
                     self.csi.deactivate(state.get("csi_pilot", {}).get("reason", "Camera stopped or reconnected.") + " Start a new pilot session and calibrate again.")
             self.csi.flush()
+            self.security.tick(self.csi.status(), self.online, self.security_context)
             await asyncio.sleep(1)
 
     async def configure_csi(self, enabled):
@@ -705,6 +723,30 @@ def create_app(data_dir=None, transport=None, poll_interval=2, face_engine=None,
     @app.get("/api/csi")
     async def csi_status(request: Request):
         return request.app.state.hub.csi.status()
+
+    @app.get("/api/security")
+    async def security_status(request: Request):
+        hub = request.app.state.hub
+        return hub.security.status(hub.csi.status(), hub.online)
+
+    @app.post("/api/security/{action}")
+    async def security_action(action: str, request: Request):
+        hub = request.app.state.hub
+        if action == "disarm": hub.security.disarm()
+        elif action == "arm":
+            try: hub.security.arm(hub.csi.status(), hub.online)
+            except ValueError as exc: raise HTTPException(409, str(exc)) from exc
+        else: raise HTTPException(404, "Unknown security action")
+        hub.changed.set()
+        return hub.security.status(hub.csi.status(), hub.online)
+
+    @app.post("/api/security/incidents/{identifier}/acknowledge")
+    async def acknowledge_incident(identifier: str, request: Request):
+        hub = request.app.state.hub
+        try: hub.security.acknowledge(identifier)
+        except KeyError as exc: raise HTTPException(404, "Incident not found") from exc
+        hub.changed.set()
+        return hub.security.status(hub.csi.status(), hub.online)
 
     @app.post("/api/csi/{action}")
     async def csi_action(action: str, request: Request):

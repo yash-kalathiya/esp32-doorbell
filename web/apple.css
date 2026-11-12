@@ -303,3 +303,8 @@ summary::-webkit-details-marker { display: none; }
 @media(max-width:650px) { .sensing-section { padding:18px 15px; } .csi-readings { grid-template-columns:repeat(2,minmax(0,1fr)); } #sensing { scroll-margin-top:76px; } }
 
 .csi-comparison { padding:12px 14px; border-radius:9px; background:#efefe8; color:#565e4b; font-size:12px; line-height:1.8; }
+.security-watch { border-top:1px solid #e4e4de; margin-top:20px; padding-top:20px; }
+.security-watch h3 { font-size:17px; }
+.security-incidents { list-style:none; padding:0; margin:16px 0 0; }
+.security-incidents > li { padding:14px 0; border-top:1px solid #e4e4de; }
+.security-incidents strong { display:block; font-size:13px; line-height:1.5; }

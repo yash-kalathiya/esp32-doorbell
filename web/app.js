@@ -65,6 +65,7 @@ function render() {
   paintFaceOverlay();
   renderSensorTiming();
   renderCsi();
+  renderSecurity();
   const online = Boolean(state?.online), c = state?.camera || {};
   $('connection').className = 'connection ' + (online ? 'online' : 'offline');
   text('connection-label', online ? 'Camera connected' : 'Camera offline');
@@ -425,7 +426,8 @@ function renderCsi() {
   $('csi-recordings').replaceChildren(...(pilot.runs || []).map(run => {
     const row = document.createElement('li'), link = document.createElement('a');
     link.href = `/api/csi/recordings/${encodeURIComponent(run.id)}`;
-    link.textContent = `${run.label === 'empty' ? 'Empty room' : 'Walking'} · ${run.valid_windows} valid windows${run.completed ? '' : ' · interrupted'} · CSV`;
+    link.textContent = `${run.label === 'empty' ? 'Empty room' : 'Walking'} · ${run.valid_windows} valid windows${run.completed ? '' : ' · interrupted'}${run.exclude_reason ? ' · excluded from comparison' : ''} · CSV`;
+    if (run.exclude_reason) link.title = run.exclude_reason;
     row.append(link); return row;
   }));
 }
@@ -439,6 +441,56 @@ for (const [id,action] of [['csi-start','start'],['csi-stop','stop'],['csi-calib
     finally { csiBusy = false; renderCsi(); }
   });
 }
+
+let securityBusy = false, securitySignature = '';
+function renderSecurity() {
+  const monitor = state?.security || {};
+  const titles = {disarmed:'Disarmed', unavailable:'Unavailable', exit_delay:'Exit delay', watching:'Armed away'};
+  text('security-state', titles[monitor.state] || 'Disarmed');
+  $('security-arm').disabled = securityBusy || !monitor.ready || monitor.armed;
+  $('security-disarm').disabled = securityBusy || !monitor.armed;
+  text('security-help', monitor.error || (monitor.state === 'unavailable' ? 'Watch is armed but CSI is unavailable. Restore capture and recalibrate; missing data does not mean the room is empty.' : monitor.state === 'exit_delay' ? `Leave the sensing room · ${monitor.exit_remaining_s}s remaining.` : monitor.state === 'watching' ? `Watching for sustained signal changes · ${monitor.elevated_windows || 0} of ${monitor.required_windows || 5} elevated windows.` : monitor.ready ? 'Ready to arm. Arming gives you 15 seconds to leave the room.' : 'Start CSI and calibrate an empty room before arming.'));
+  const signature = JSON.stringify(monitor.incidents || []);
+  if (signature === securitySignature) return;
+  securitySignature = signature;
+  $('security-incidents').replaceChildren();
+  if (!(monitor.incidents || []).length) {
+    const empty = document.createElement('li'); empty.className = 'field-help'; empty.textContent = 'No security incidents saved.'; $('security-incidents').append(empty);
+  }
+  for (const incident of monitor.incidents || []) {
+    const row = document.createElement('li');
+    const title = document.createElement('strong'); title.textContent = 'Possible intrusion · sustained Wi-Fi signal change';
+    const when = document.createElement('p'); when.className = 'field-help'; when.textContent = new Date(incident.created_at).toLocaleString();
+    const context = document.createElement('p'); context.className = 'field-help';
+    const observations = incident.evidence?.context?.recent_camera_observations || [];
+    context.textContent = observations.length ? `Earlier camera observations: ${observations.map(x=>x.label).join(', ')}. The source of CSI movement is unknown.` : 'No recent camera observation. The source of CSI movement is unknown.';
+    row.append(title,when,context);
+    if (incident.acknowledged_at) {
+      const done = document.createElement('span'); done.className = 'field-help'; done.textContent = 'Acknowledged'; row.append(done);
+    } else {
+      const button = document.createElement('button'); button.className = 'button secondary'; button.textContent = 'Acknowledge';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          await api(`/api/security/incidents/${incident.id}/acknowledge`, {method:'POST'});
+          state = await api('/api/status'); render();
+        }
+        catch(error) { button.disabled = false; toast(error.message); }
+      });
+      row.append(button);
+    }
+    $('security-incidents').append(row);
+  }
+}
+for (const action of ['arm', 'disarm']) $('security-'+action).addEventListener('click', async () => {
+  securityBusy = true; renderSecurity();
+  try {
+    await api('/api/security/'+action, {method:'POST'});
+    state = await api('/api/status'); render();
+    toast(action === 'arm' ? 'Armed away. Leave the sensing room during the exit delay.' : 'Security watch disarmed.');
+  } catch(error) { toast(error.message); }
+  finally { securityBusy = false; renderSecurity(); }
+});
 
 let burstFiles = [], burstUrls = [], burstAnchor = '', burstEpoch = 0, burstBusy = false, burstController = null;
 function clearBurst() {
